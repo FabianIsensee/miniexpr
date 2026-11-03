@@ -8987,6 +8987,8 @@ static void eval_reduction(const me_expr* n, int output_nitems) {
     }
 }
 
+static void free_intermediate_buffers(me_expr* node);
+
 static void private_eval(const me_expr* n) {
     if (!n) return;
 
@@ -9139,6 +9141,10 @@ static void private_eval(const me_expr* n) {
         if (eval_bool_expr((me_expr*)n)) {
             return;
         }
+        /* eval_bool_expr() sized the operand buffers it allocated for bools;
+         * when it gives up on an operand (a + b in `not a + b`), the
+         * evaluation below must not write numbers into them. */
+        free_intermediate_buffers((me_expr*)n);
         goto fallback_eval;
     }
 
