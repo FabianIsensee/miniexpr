@@ -8,6 +8,8 @@ miniexpr automatically promotes types when necessary. The general promotion hier
 - Integer types → Float types
 - Lower precision → Higher precision
 - Real types → Complex types (when complex is involved)
+- In expressions, bool + bool stays bool and is logical or, bool * bool is logical and (NumPy);
+  DSL kernels keep Python's numeric bools (`True + True == 2`)
 
 **Windows**: Building requires clang-cl; complex64 and complex128 are supported, including portable interpretation. DSL JIT complex kernels remain unsupported on all platforms.
 

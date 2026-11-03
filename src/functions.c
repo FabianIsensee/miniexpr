@@ -2854,7 +2854,11 @@ static void vec_or_bool(const bool* a, const bool* b, bool* out, int n);
 static void vec_xor_bool(const bool* a, const bool* b, bool* out, int n);
 static void vec_not_bool(const bool* a, bool* out, int n);
 
-static void promote_logical_bool(me_expr* node) {
+/* & | ^ ~ of bools are logical operators (~ of a bool 1 is 0, not -2).
+ * The typing pass calls this once a node's dtype is final; at parse time
+ * dtypes are provisional (where() starts as float64, and a number literal
+ * typed by a bool output made 2 & 3 a logical and). */
+void retag_logical_bool(me_expr* node) {
     if (node && (node->flags & ME_EXPR_FLAG_MENUDET_1)) return;
     if (!node || node->dtype != ME_BOOL) return;
 
@@ -2869,6 +2873,28 @@ static void promote_logical_bool(me_expr* node) {
     }
     else if (node->function == bit_not) {
         node->function = logical_not;
+    }
+}
+
+/* Plain expressions follow NumPy's bool arrays: bool + bool is logical or
+ * and bool * bool is logical and (as int8 they would store 2 in a bool or
+ * feed 2 into a parent). DSL kernels keep Python's numeric bools
+ * (True + True == 2) and are not passed through here. */
+void retag_bool_arithmetic(me_expr* n) {
+    if (!n || !(IS_FUNCTION(n->type) || IS_CLOSURE(n->type))) return;
+    const int arity = ARITY(n->type);
+    bool all_bool = arity == 2;
+    for (int i = 0; i < arity; i++) {
+        me_expr* arg = (me_expr*)n->parameters[i];
+        retag_bool_arithmetic(arg);
+        all_bool = all_bool && arg->dtype == ME_BOOL;
+    }
+    if (!IS_FUNCTION(n->type) || !all_bool || (n->flags & ME_EXPR_FLAG_MENUDET_1)) return;
+    if (n->function == (void*)add) {
+        n->function = logical_or;
+    }
+    else if (n->function == (void*)mul) {
+        n->function = logical_and;
     }
 }
 
@@ -4957,7 +4983,6 @@ static me_expr* power(state* s) {
         if (dsl_menudet_typed_profile(s->semantic_profile)) {
             ret->flags |= ME_EXPR_FLAG_MENUDET_1;
         }
-        promote_logical_bool(ret);
         return ret;
     }
 
@@ -5128,7 +5153,6 @@ static me_expr* bitwise_and(state* s) {
 
         ret->function = bit_and;
         apply_type_promotion(ret);
-        promote_logical_bool(ret);
     }
 
     return ret;
@@ -5152,7 +5176,6 @@ static me_expr* bitwise_xor(state* s) {
 
         ret->function = bit_xor;
         apply_type_promotion(ret);
-        promote_logical_bool(ret);
     }
 
     return ret;
@@ -5176,7 +5199,6 @@ static me_expr* bitwise_or(state* s) {
 
         ret->function = (void*)t;
         apply_type_promotion(ret);
-        promote_logical_bool(ret);
     }
 
     return ret;

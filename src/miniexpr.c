@@ -1580,6 +1580,7 @@ static bool retype_self(me_expr* n) {
         return true;
     }
     n->dtype = retype_value_dtype(n);
+    retag_logical_bool(n);
     /* A reduction evaluates its argument on its own (eval_reduction()). */
     if (is_reduction_node(n)) {
         return true;
@@ -1693,8 +1694,14 @@ void me_free(me_expr* n) {
 
 int private_compile_ex(const char* expression, const me_variable* variables, int var_count,
                                void* output, int nitems, me_dtype dtype, int* error, me_expr** out) {
-    return private_compile_profile_ex(expression, variables, var_count, output, nitems,
-                                      dtype, ME_DSL_PROFILE_FULL, error, out);
+    int rc = private_compile_profile_ex(expression, variables, var_count, output, nitems,
+                                        dtype, ME_DSL_PROFILE_FULL, error, out);
+    /* Plain expressions are NumPy array expressions (DSL kernels compile
+     * through private_compile_profile_ex() and keep numeric bools). */
+    if (rc == ME_COMPILE_SUCCESS && out) {
+        retag_bool_arithmetic(*out);
+    }
+    return rc;
 }
 
 int private_compile_profile_ex(const char* expression, const me_variable* variables, int var_count,
