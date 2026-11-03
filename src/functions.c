@@ -271,6 +271,7 @@ static bool contains_reduction(const me_expr* n) {
 }
 
 static void private_eval(const me_expr* n);
+static void private_eval_operand(const me_expr* n);
 static void eval_reduction(const me_expr* n, int output_nitems);
 static double pi(void) { return 3.14159265358979323846; }
 static double e(void) { return 2.71828182845904523536; }
@@ -629,6 +630,34 @@ static double any_reduce(double x) { return x + any_salt; }
 static double all_reduce(double x) { return x * (1.0 + all_salt); }
 double min_reduce(double x) { return x + min_salt; }
 double max_reduce(double x) { return x - max_salt; }
+
+/* Binary operations whose result is floating point for integer and bool
+ * operands, as in NumPy: true division and the real two-argument functions. */
+bool is_ldexp_function(const void* func) {
+    return func == (void*)ldexp_wrapper;
+}
+
+bool is_square_function(const void* func) {
+    return func == (void*)square;
+}
+
+bool is_float_result_binary_function(const void* func) {
+    return func == (void*)divide ||
+        func == (void*)atan2 ||
+        func == (void*)copysign ||
+        func == (void*)hypot ||
+        func == (void*)logaddexp ||
+        func == (void*)nextafter;
+}
+
+/* The `%` operator's function: fmod here, NumPy's remainder where `%` and
+ * remainder() share it. Compared with the registered address too, as CRT
+ * aliases may differ (see me_menudet_operator()). */
+bool is_modulo_function(const void* func) {
+    if (func == (void*)fmod) return true;
+    const me_variable* builtin = find_builtin("remainder", 9);
+    return builtin && func == builtin->address;
+}
 
 static float reduce_min_float32_nan_safe(const float* data, int nitems) {
     if (nitems <= 0) return INFINITY;
@@ -2832,6 +2861,30 @@ static bool is_logical_function(const void* func) {
         func == (void*)logical_not || func == (void*)logical_xor;
 }
 
+/* x != 0: the truth value NumPy takes of a non-bool where() condition. */
+me_expr* new_nonzero_test(me_expr* x) {
+    me_expr* zero = new_expr(ME_CONSTANT, 0);
+    if (!zero) return NULL;
+    zero->value = 0.0;
+    zero->dtype = x->dtype;
+    me_expr* test = NEW_EXPR(ME_FUNCTION2 | ME_FLAG_PURE, x, zero);
+    if (!test) {
+        me_free(zero);
+        return NULL;
+    }
+    test->function = cmp_ne;
+    test->dtype = ME_BOOL;
+    return test;
+}
+
+bool is_logical_node(const me_expr* n) {
+    return n && IS_FUNCTION(n->type) && is_logical_function(n->function);
+}
+
+bool is_conversion_node(const me_expr* n) {
+    return n && IS_FUNCTION(n->type) && ARITY(n->type) == 1 && n->function == NULL;
+}
+
 typedef void (*convert_func_t)(const void*, void*, int);
 static convert_func_t get_convert_func(me_dtype from, me_dtype to);
 
@@ -2840,7 +2893,11 @@ static void vec_or_bool(const bool* a, const bool* b, bool* out, int n);
 static void vec_xor_bool(const bool* a, const bool* b, bool* out, int n);
 static void vec_not_bool(const bool* a, bool* out, int n);
 
-static void promote_logical_bool(me_expr* node) {
+/* & | ^ ~ of bools are logical operators (~ of a bool 1 is 0, not -2).
+ * The typing pass calls this once a node's dtype is final; at parse time
+ * dtypes are provisional (where() starts as float64, and a number literal
+ * typed by a bool output made 2 & 3 a logical and). */
+void retag_logical_bool(me_expr* node) {
     if (node && (node->flags & ME_EXPR_FLAG_MENUDET_1)) return;
     if (!node || node->dtype != ME_BOOL) return;
 
@@ -2856,6 +2913,35 @@ static void promote_logical_bool(me_expr* node) {
     else if (node->function == bit_not) {
         node->function = logical_not;
     }
+}
+
+/* Plain expressions follow NumPy's bool arrays: bool + bool is logical or
+ * and bool * bool is logical and (as int8 they would store 2 in a bool or
+ * feed 2 into a parent). DSL kernels keep Python's numeric bools
+ * (True + True == 2) and are not passed through here. */
+bool retag_bool_arithmetic(me_expr* n) {
+    if (!n || !(IS_FUNCTION(n->type) || IS_CLOSURE(n->type))) return false;
+    const int arity = ARITY(n->type);
+    bool all_bool = arity == 2;
+    bool renamed = false;
+    for (int i = 0; i < arity; i++) {
+        me_expr* arg = (me_expr*)n->parameters[i];
+        renamed |= retag_bool_arithmetic(arg);
+        all_bool = all_bool && arg->dtype == ME_BOOL;
+    }
+    if (!IS_FUNCTION(n->type) || !all_bool ||
+        (n->flags & (ME_EXPR_FLAG_MENUDET_1 | ME_EXPR_FLAG_POWER_PRODUCT))) {
+        return renamed;
+    }
+    if (n->function == (void*)add) {
+        n->function = logical_or;
+        return true;
+    }
+    if (n->function == (void*)mul) {
+        n->function = logical_and;
+        return true;
+    }
+    return renamed;
 }
 
 /* Stable operation identity for the menudet typed pass. Do not dispatch
@@ -2985,7 +3071,7 @@ static bool eval_operand_to_type(me_expr* expr, me_dtype eval_type, int nitems,
     expr->output = buffer;
     expr->dtype = eval_type;
     expr->nitems = nitems;
-    private_eval(expr);
+    private_eval_operand(expr);
 
     expr->output = saved_output;
     expr->dtype = saved_dtype;
@@ -3009,16 +3095,24 @@ static bool compare_to_bool_output(const me_expr* n, me_dtype eval_type,
 
     const void* func = n->function;
 
+/* One loop per operand kind, so that each vectorizes whether or not the
+ * compiler unswitches a per-element constant test (that depends on how much
+ * of the caller gets inlined). */
 #define CMP_LOOP_OP(TYPE, OP) \
     do { \
         const TYPE* lptr = (const TYPE*)ldata; \
         const TYPE* rptr = (const TYPE*)rdata; \
-        TYPE lc = (TYPE)lval; \
-        TYPE rc = (TYPE)rval; \
-        for (int i = 0; i < nitems; i++) { \
-            TYPE a = lconst ? lc : lptr[i]; \
-            TYPE b = rconst ? rc : rptr[i]; \
-            out[i] = (a OP b); \
+        const TYPE lc = (TYPE)lval; \
+        const TYPE rc = (TYPE)rval; \
+        if (lconst && rconst) { \
+            const bool v = (lc OP rc); \
+            for (int i = 0; i < nitems; i++) out[i] = v; \
+        } else if (rconst) { \
+            for (int i = 0; i < nitems; i++) out[i] = (lptr[i] OP rc); \
+        } else if (lconst) { \
+            for (int i = 0; i < nitems; i++) out[i] = (lc OP rptr[i]); \
+        } else { \
+            for (int i = 0; i < nitems; i++) out[i] = (lptr[i] OP rptr[i]); \
         } \
     } while (0)
 
@@ -4044,6 +4138,26 @@ bool me_menudet_string_execute(const me_expr *n, const void *const *values, void
 static bool eval_bool_expr(me_expr* n) {
     if (!n || !n->output) return false;
 
+    /* A bool-to-bool conversion node is only a type boundary (the typing
+     * pass puts one around each comparison under and/or/not): evaluate its
+     * source straight into this output. */
+    if (is_conversion_node(n) && n->dtype == ME_BOOL) {
+        me_expr* source = (me_expr*)n->parameters[0];
+        if (!source || source->dtype != ME_BOOL) return false;
+        if (source->type == ME_VARIABLE) {
+            memcpy(n->output, source->bound, (size_t)n->nitems * sizeof(bool));
+            return true;
+        }
+        void* saved_output = source->output;
+        const int saved_nitems = source->nitems;
+        source->output = n->output;
+        source->nitems = n->nitems;
+        const bool ok = eval_bool_expr(source);
+        source->output = saved_output;
+        source->nitems = saved_nitems;
+        return ok;
+    }
+
     if (n->type == ME_CONSTANT) {
         bool val = (bool)(n->value != 0.0);
         bool* out = (bool*)n->output;
@@ -4212,6 +4326,24 @@ static void read_number_token(state* s) {
             }
         }
         return;
+    }
+
+    /* A decimal integer with more digits than a double holds may not survive
+     * strtod(): compare its digits with the exact decimal value of the double. */
+    s->literal_inexact = false;
+    if (!is_float) {
+        const char* digits = start;
+        while (digits < s->next - 1 && *digits == '0') digits++;
+        const ptrdiff_t ndigits = s->next - digits;
+        bool decimal = ndigits > 15;
+        for (const char* p = digits; p < s->next && decimal; p++) {
+            decimal = *p >= '0' && *p <= '9';
+        }
+        if (decimal) {
+            char exact[400];
+            const int len = snprintf(exact, sizeof(exact), "%.0f", s->value);
+            s->literal_inexact = len != ndigits || memcmp(exact, digits, (size_t)len) != 0;
+        }
     }
 
     if (is_float) {
@@ -4483,6 +4615,7 @@ static void read_identifier_token(state* s) {
     case ME_FUNCTION6:
     case ME_FUNCTION7:
         s->type = var->type;
+        s->user_function = !builtin_binding;
         /* The token enum aliases pure FUNCTION0 (40: pi, e) with logical-not,
          * so the parser read `pi` as `not` wherever `not` may start an operand
          * ((pi + x) was 0, copysign(pi, x) did not parse). The token carries
@@ -4600,6 +4733,7 @@ static void read_operator_token(state* s) {
 
 void next_token(state* s) {
     s->type = TOK_NULL;
+    s->user_function = false;
 
     do {
         skip_whitespace(s);
@@ -4705,6 +4839,15 @@ static me_expr* base(state* s) {
             ret->integer_magnitude = s->integer_magnitude;
             ret->literal_f32 = s->literal_f32;
         }
+        else {
+            ret->flags |= ME_EXPR_FLAG_NUMBER_LITERAL;
+            if (is_float_dtype(s->dtype) || is_complex_dtype(s->dtype)) {
+                ret->flags |= ME_EXPR_FLAG_FLOAT_LITERAL;
+            }
+            if (s->literal_inexact) {
+                ret->flags |= ME_EXPR_FLAG_INEXACT_LITERAL;
+            }
+        }
         // Use inferred type for constants (floating point vs integer)
         if (s->target_dtype == ME_AUTO) {
             ret->dtype = s->dtype;
@@ -4788,6 +4931,7 @@ static me_expr* base(state* s) {
 
     if (IS_FUNCTION(s->type) || IS_CLOSURE(s->type)) {
         me_dtype func_dtype = s->dtype;
+        const unsigned user_flag = s->user_function ? ME_EXPR_FLAG_USER_FUNCTION : 0;
         switch (TYPE_MASK(s->type)) {
         case ME_FUNCTION0:
         case ME_CLOSURE0:
@@ -4795,6 +4939,7 @@ static me_expr* base(state* s) {
             CHECK_NULL(ret);
 
             ret->function = s->function;
+            ret->flags |= user_flag;
             if (func_dtype != ME_AUTO) {
                 ret->dtype = func_dtype;
                 ret->flags |= ME_EXPR_FLAG_EXPLICIT_DTYPE;
@@ -4818,6 +4963,7 @@ static me_expr* base(state* s) {
             CHECK_NULL(ret);
 
             ret->function = s->function;
+            ret->flags |= user_flag;
             if (s->type & ME_FLAG_FLOAT_MATH) {
                 ret->flags |= ME_EXPR_FLAG_FLOAT_MATH;
             }
@@ -4850,6 +4996,7 @@ static me_expr* base(state* s) {
             CHECK_NULL(ret);
 
             ret->function = s->function;
+            ret->flags |= user_flag;
             if (func_dtype != ME_AUTO) {
                 ret->dtype = func_dtype;
                 ret->flags |= ME_EXPR_FLAG_EXPLICIT_DTYPE;
@@ -4953,7 +5100,6 @@ static me_expr* unary(state* s, bool with_power) {
         if (dsl_menudet_typed_profile(s->semantic_profile)) {
             ret->flags |= ME_EXPR_FLAG_MENUDET_1;
         }
-        promote_logical_bool(ret);
         return ret;
     }
 
@@ -5110,7 +5256,6 @@ static me_expr* bitwise_and(state* s) {
 
         ret->function = bit_and;
         apply_type_promotion(ret);
-        promote_logical_bool(ret);
     }
 
     return ret;
@@ -5134,7 +5279,6 @@ static me_expr* bitwise_xor(state* s) {
 
         ret->function = bit_xor;
         apply_type_promotion(ret);
-        promote_logical_bool(ret);
     }
 
     return ret;
@@ -5158,7 +5302,6 @@ static me_expr* bitwise_or(state* s) {
 
         ret->function = (void*)t;
         apply_type_promotion(ret);
-        promote_logical_bool(ret);
     }
 
     return ret;
@@ -6323,7 +6466,7 @@ static void eval_dsl_value_cast(const me_expr *node, me_dtype output_dtype) {
             }
             arg->output = scratch;
             arg->nitems = count;
-            private_eval(arg);
+            private_eval_operand(arg);
             arg->output = saved_output;
             arg->nitems = saved_count;
             data = scratch;
@@ -6754,7 +6897,8 @@ static void me_eval_##SUFFIX(const me_expr *n) { \
             if (is_conv_node) { \
                 /* Conversion node: evaluate child with native dtype, then convert */ \
                 me_expr *source = (me_expr*)n->parameters[0]; \
-                me_dtype source_dtype = n->input_dtype; \
+                /* private_eval() writes the source in its own dtype. */ \
+                me_dtype source_dtype = source->dtype; \
                 size_t source_size = dtype_size(source_dtype); \
                 \
                 if (source->type != ME_CONSTANT && source->type != ME_VARIABLE) { \
@@ -6762,8 +6906,8 @@ static void me_eval_##SUFFIX(const me_expr *n) { \
                         source->output = malloc(n->nitems * source_size); \
                         source->nitems = n->nitems; \
                     } \
-                    /* Evaluate source with its native dtype via private_eval */ \
-                    private_eval(source); \
+                    /* Evaluate source with its native dtype. */ \
+                    private_eval_operand(source); \
                 } \
                 \
                 /* Perform the conversion */ \
@@ -6775,6 +6919,10 @@ static void me_eval_##SUFFIX(const me_expr *n) { \
                     convert_func_t conv = get_convert_func(source_dtype, ME_EVAL_DTYPE_##SUFFIX); \
                     if (conv) { \
                         conv(src_data, output, n->nitems); \
+                    } \
+                    else if (dtype_size(source_dtype) == sizeof(TYPE)) { \
+                        /* Same dtype (the node is only a type boundary). */ \
+                        memcpy(output, src_data, (size_t)n->nitems * sizeof(TYPE)); \
                     } \
                 } \
                 break; \
@@ -9040,6 +9188,18 @@ static void eval_reduction(const me_expr* n, int output_nitems) {
 
 static void free_intermediate_buffers(me_expr* node);
 
+/* Evaluates an operand into its n->nitems items. A reduction fills every
+ * item with its value, as the typed evaluators do for a direct operand;
+ * private_eval() writes one item, for a root reduction. */
+static void private_eval_operand(const me_expr* n) {
+    if (is_reduction_node(n)) {
+        eval_reduction(n, n->nitems);
+    }
+    else {
+        private_eval(n);
+    }
+}
+
 static void private_eval(const me_expr* n) {
     if (!n) return;
 
@@ -9742,6 +9902,18 @@ static me_expr* clone_expr(const me_expr* src) {
     return clone;
 }
 
+/* Gives a comparison a fixed outcome while it still reads operand `keep`
+ * (an integer, so x == x always holds): the typing pass uses it for
+ * comparisons with literals outside every integer range. False on OOM. */
+bool make_fixed_comparison(me_expr* cmp, int keep, bool outcome) {
+    me_expr* copy = clone_expr((const me_expr*)cmp->parameters[keep]);
+    if (!copy) return false;
+    me_free((me_expr*)cmp->parameters[1 - keep]);
+    cmp->parameters[1 - keep] = copy;
+    cmp->function = outcome ? (void*)cmp_eq : (void*)cmp_ne;
+    return true;
+}
+
 /* Thread-safe chunked evaluation using expression cloning.
  * This function is safe to call from multiple threads simultaneously,
  * even on the same expression object. Each call creates a temporary
@@ -9921,6 +10093,33 @@ cleanup:
 }
 
 
+/* Arithmetic and bitwise operators of number literals give a number
+ * literal again, as in Python (-1.5, 2 * 3, 1 / 2, 1 << 2); a function of
+ * literals (sin(1.0)) is a NumPy float64 scalar in NumPy, i.e. strong. */
+static unsigned folded_literal_flags(const me_expr* n, double value) {
+    const bool arithmetic = me_arithmetic_operator(n) != NULL ||
+        (ARITY(n->type) == 2 && n->function == (void*)pow);
+    const bool bitwise = n->function == (void*)bit_and || n->function == (void*)bit_or ||
+        n->function == (void*)bit_xor || n->function == (void*)bit_not ||
+        n->function == (void*)bit_shl || n->function == (void*)bit_shr ||
+        (ARITY(n->type) == 2 && is_modulo_function(n->function));
+    if (!arithmetic && !bitwise) return 0;
+    /* A negative power of an integer is a float in Python (1 ** -1 is 1.0). */
+    bool is_float = n->function == (void*)divide || value != floor(value) ||
+        (n->function == (void*)pow && ((const me_expr*)n->parameters[1])->value < 0);
+    unsigned inexact = 0;
+    for (int i = 0; i < ARITY(n->type); i++) {
+        const me_expr* arg = (const me_expr*)n->parameters[i];
+        /* A folded comparison of literals is a Python bool, whose arithmetic
+         * gives a Python int (-(1 < 2) is -1, (1 < 2) + (2 < 3) is 2). */
+        if (arithmetic && arg->dtype == ME_BOOL && !(arg->flags & ME_EXPR_FLAG_NUMBER_LITERAL)) continue;
+        if (!(arg->flags & ME_EXPR_FLAG_NUMBER_LITERAL)) return 0;
+        is_float |= (arg->flags & ME_EXPR_FLAG_FLOAT_LITERAL) != 0;
+        inexact |= arg->flags & ME_EXPR_FLAG_INEXACT_LITERAL;
+    }
+    return ME_EXPR_FLAG_NUMBER_LITERAL | (is_float ? ME_EXPR_FLAG_FLOAT_LITERAL : 0) | inexact;
+}
+
 void optimize(me_expr* n) {
     /* Evaluates as much as possible. */
     if (!n) return;
@@ -9939,7 +10138,8 @@ void optimize(me_expr* n) {
                 known = 0;
             }
         }
-        if (IS_FUNCTION(n->type) && arity == 2 && n->function == (void*)pow) {
+        /* A constant base is folded below instead (3**2 stays a literal). */
+        if (!known && IS_FUNCTION(n->type) && arity == 2 && n->function == (void*)pow) {
             me_expr *right = (me_expr*)n->parameters[1];
             if (right && right->type == ME_CONSTANT && right->value == 2.0) {
                 /* Fast path: rewrite x**2 (or pow(x,2)) to x*x to avoid scalar pow in eval. */
@@ -9949,6 +10149,7 @@ void optimize(me_expr* n) {
                     me_free(right);
                     n->parameters[1] = left_clone;
                     n->function = mul;
+                    n->flags |= ME_EXPR_FLAG_POWER_PRODUCT;
                     apply_type_promotion(n);
                     known = 0;
                 }
@@ -9961,11 +10162,13 @@ void optimize(me_expr* n) {
                     me_expr *inner = NEW_EXPR(ME_FUNCTION2 | ME_FLAG_PURE, left, left_clone);
                     if (inner) {
                         inner->function = mul;
+                        inner->flags |= ME_EXPR_FLAG_POWER_PRODUCT;
                         apply_type_promotion(inner);
                         me_free(right);
                         n->parameters[0] = inner;
                         n->parameters[1] = left_clone2;
                         n->function = mul;
+                        n->flags |= ME_EXPR_FLAG_POWER_PRODUCT;
                         apply_type_promotion(n);
                         known = 0;
                     } else {
@@ -9978,11 +10181,72 @@ void optimize(me_expr* n) {
                 }
             }
         }
-        if (known) {
-            const double value = me_eval_scalar(n);
+        /* A conversion the parser inserted (not an explicit cast) over a
+         * constant is dropped: the typing pass types the constant itself, while
+         * folding the conversion would truncate it to a provisional dtype
+         * (-2 as uint8, 5/2 as int32, -2 as complex128). */
+        if (known && is_conversion_node(n) && !(n->flags & ME_EXPR_FLAG_EXPLICIT_DTYPE)) {
+            me_expr* child = (me_expr*)n->parameters[0];
+            const double value = child->value;
+            const me_dtype dtype = child->dtype;
+            const unsigned flags = child->flags;
             me_free_parameters(n);
             n->type = ME_CONSTANT;
             n->value = value;
+            n->dtype = dtype;
+            n->flags = flags;
+            return;
+        }
+        if (known) {
+            const double value = me_eval_scalar(n);
+            unsigned literal_flags = folded_literal_flags(n, value);
+            me_dtype dtype;
+            if (n->flags & ME_EXPR_FLAG_USER_FUNCTION) {
+                /* A caller's function keeps its registered or parse-time dtype. */
+                dtype = n->dtype;
+            }
+            else if (arity == 0) {
+                /* pi and e are Python floats in NumPy expressions: weak. */
+                dtype = ME_FLOAT64;
+                literal_flags = ME_EXPR_FLAG_NUMBER_LITERAL | ME_EXPR_FLAG_FLOAT_LITERAL;
+            }
+            else {
+                /* A function of literals is a strong NumPy scalar computed on
+                 * the literals' default dtypes (np.abs(-2) is int64, np.log(3)
+                 * is float64), not on the provisional dtype a literal took from
+                 * the first variable or the output. */
+                if (!literal_flags) {
+                    for (i = 0; i < arity; ++i) {
+                        me_expr* arg = (me_expr*)n->parameters[i];
+                        if ((arg->flags & ME_EXPR_FLAG_NUMBER_LITERAL) && !is_complex_dtype(arg->dtype)) {
+                            arg->dtype = (arg->flags & ME_EXPR_FLAG_FLOAT_LITERAL) ? ME_FLOAT64 : ME_INT64;
+                        }
+                    }
+                }
+                /* infer_output_type() takes a bool n->dtype for a comparison;
+                 * another operator of literals typed by a bool output (7 % 5)
+                 * is typed from its operands. */
+                if (n->dtype == ME_BOOL && !is_comparison_node(n) && !is_logical_node(n)) {
+                    n->dtype = ME_AUTO;
+                }
+                /* Type the folded constant from its operands (-1.5 like 1.5),
+                 * not by the call's provisional parse-time dtype; true division
+                 * and the float functions of integer constants are float64. */
+                dtype = infer_output_type(n);
+                if (IS_FUNCTION(n->type) && ARITY(n->type) == 2 &&
+                    (is_float_result_binary_function(n->function) || is_ldexp_function(n->function)) &&
+                    !is_float_dtype(dtype) && !is_complex_dtype(dtype)) {
+                    dtype = ME_FLOAT64;
+                }
+            }
+            me_free_parameters(n);
+            n->type = ME_CONSTANT;
+            /* An integer zero has no sign (8 % -4 and -0 are 0, not -0.0). */
+            const bool integer_result = (literal_flags & ME_EXPR_FLAG_NUMBER_LITERAL) ?
+                !(literal_flags & ME_EXPR_FLAG_FLOAT_LITERAL) : (is_integer_dtype(dtype) || dtype == ME_BOOL);
+            n->value = integer_result && value == 0 ? 0.0 : value;
+            n->dtype = dtype;
+            n->flags |= literal_flags;
         }
     }
 }
