@@ -657,7 +657,7 @@ bool is_int8_for_bool_function(const void* func) {
     return func == (void*)pow ||
         func == (void*)square ||
         func == (void*)fmod ||
-        func == (void*)remainder;
+        func == (void*)numpy_remainder;
 }
 
 /* NumPy computes float_array ** 0.5 as np.sqrt() and float_array ** -1 as
