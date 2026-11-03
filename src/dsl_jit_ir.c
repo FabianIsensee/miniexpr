@@ -9,6 +9,7 @@
 **********************************************************************/
 
 #include "dsl_jit_ir.h"
+#include "dsl_compare.h"
 #include "dsl_config.h"
 
 #include <ctype.h>
@@ -107,7 +108,8 @@ static bool dsl_jit_ir_expr_init(me_dsl_jit_ir_expr *out, const me_dsl_expr *exp
         return false;
     }
     memset(out, 0, sizeof(*out));
-    out->text = dsl_jit_strdup(expr->text);
+    /* Code generation emits this text as C; keep Python's grouping. */
+    out->text = dsl_c_grouping(expr->text);
     if (!out->text) {
         return false;
     }
@@ -431,7 +433,7 @@ static bool dsl_jit_ir_expr_init_from_text(me_dsl_jit_ir_expr *out, const char *
         return false;
     }
     memset(out, 0, sizeof(*out));
-    out->text = dsl_jit_strdup(text);
+    out->text = dsl_c_grouping(text);
     if (!out->text) {
         return false;
     }

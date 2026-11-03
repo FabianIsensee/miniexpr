@@ -12,7 +12,9 @@
  * interpreter compilation or JIT IR construction. No operand trees are copied:
  * each value is captured once and later links run in guarded statement blocks.
  * The small precedence parser below is only used to locate chains and their
- * enclosing evaluation contexts; chain-free expressions remain untouched. */
+ * enclosing evaluation contexts; chain-free expressions remain untouched.
+ * dsl_c_grouping() reuses it for the JIT C generator, which emits expression
+ * text, to make Python's grouping explicit where C's differs. */
 #include "dsl_compare.h"
 
 #include <ctype.h>
@@ -173,7 +175,7 @@ static chain_node *chain_parse_primary(chain_parser *p) {
         node->has_chain = node->left->has_chain;
         node->end = p->end;
         chain_token(p);
-    } else if (!strcmp(p->op, "+") || !strcmp(p->op, "-") ||
+    } else if (!strcmp(p->op, "+") || !strcmp(p->op, "-") || !strcmp(p->op, "~") ||
                !strcmp(p->op, "!") || !strcmp(p->op, "not")) {
         node = chain_node_new(p, C_UNARY);
         if (!node) {
@@ -697,6 +699,136 @@ static bool chain_lower_block(chain_context *ctx, me_dsl_block *block) {
     dsl_block_free(block);
     *block = lowered;
     return true;
+}
+
+/* C groups two Python forms differently: `not`/`!` is a tight unary operator
+ * in C (Python: `not a == b` is `not (a == b)`), and C comparisons bind
+ * tighter than `&`, `^` and `|` (Python: `a < b & c` is `a < (b & c)`).
+ * Other texts need no grouping and are copied without parsing. */
+static bool chain_c_grouping_candidate(const char *s) {
+    return strpbrk(s, "!&|^") != NULL || strstr(s, "not") != NULL;
+}
+
+static bool chain_is_bitwise(const chain_node *node) {
+    return node && node->kind == C_BINARY && !node->op[1] &&
+           (node->op[0] == '&' || node->op[0] == '|' || node->op[0] == '^');
+}
+
+static void chain_group(const char *text, int *opens, int *closes, const chain_node *node) {
+    opens[node->start - text]++;
+    closes[node->end - text]++;
+}
+
+static void chain_mark_c_groups(const char *text, int *opens, int *closes, const chain_node *node) {
+    if (!node) {
+        return;
+    }
+    if (node->kind == C_UNARY && (!strcmp(node->op, "not") || !strcmp(node->op, "!")) &&
+        (node->left->kind == C_BINARY || node->left->kind == C_COMPARE || node->left->kind == C_BOOL)) {
+        chain_group(text, opens, closes, node->left);
+    }
+    if (node->kind == C_COMPARE) {
+        if (chain_is_bitwise(node->left)) {
+            chain_group(text, opens, closes, node->left);
+        }
+        if (chain_is_bitwise(node->right)) {
+            chain_group(text, opens, closes, node->right);
+        }
+    }
+    chain_mark_c_groups(text, opens, closes, node->left);
+    chain_mark_c_groups(text, opens, closes, node->right);
+    for (const chain_node *arg = node->args; arg; arg = arg->arg_next) {
+        chain_mark_c_groups(text, opens, closes, arg);
+    }
+}
+
+static char *dsl_c_grouping_raw(const char *text) {
+    size_t len = strlen(text);
+    if (!chain_c_grouping_candidate(text)) {
+        return chain_copy(text, text + len);
+    }
+    chain_parser parser = {.cursor = text};
+    chain_token(&parser);
+    chain_node *root = chain_parse_expr(&parser, 0);
+    char *out = NULL;
+    if (parser.failed || !root || *parser.token) {
+        /* Not this parser's syntax; the compiler reports real errors. */
+        out = chain_copy(text, text + len);
+    } else {
+        int *opens = calloc(len + 1, sizeof(*opens));
+        int *closes = calloc(len + 1, sizeof(*closes));
+        if (opens && closes) {
+            chain_mark_c_groups(text, opens, closes, root);
+            size_t extra = 0;
+            for (size_t i = 0; i <= len; i++) {
+                extra += (size_t)opens[i] + (size_t)closes[i];
+            }
+            out = malloc(len + extra + 1);
+        }
+        if (out) {
+            size_t o = 0;
+            for (size_t i = 0; i <= len; i++) {
+                for (int k = 0; k < closes[i]; k++) {
+                    out[o++] = ')';
+                }
+                for (int k = 0; k < opens[i]; k++) {
+                    out[o++] = '(';
+                }
+                if (i < len) {
+                    out[o++] = text[i];
+                }
+            }
+            out[o] = 0;
+        }
+        free(opens);
+        free(closes);
+    }
+    while (parser.allocated) {
+        chain_node *node = parser.allocated;
+        parser.allocated = node->allocated_next;
+        free(node);
+    }
+    return out;
+}
+
+/* Python reads --x as -(-x) and ++x as +(+x); C would decrement/increment.
+ * Separates such pairs outside string literals (DSL has no ++/--). */
+static char *dsl_c_split_sign_pairs(char *text) {
+    if (!text || (!strstr(text, "--") && !strstr(text, "++"))) return text;
+    size_t len = strlen(text);
+    char *out = malloc(2 * len + 1);
+    if (!out) {
+        free(text);
+        return NULL;
+    }
+    size_t o = 0;
+    char quote = 0;
+    for (size_t i = 0; i < len; i++) {
+        char c = text[i];
+        if (quote) {
+            if (c == '\\' && i + 1 < len) {
+                out[o++] = c;
+                c = text[++i];
+            }
+            else if (c == quote) {
+                quote = 0;
+            }
+        }
+        else if (c == '"' || c == '\'') {
+            quote = c;
+        }
+        out[o++] = c;
+        if (!quote && (c == '-' || c == '+') && text[i + 1] == c) {
+            out[o++] = ' ';
+        }
+    }
+    out[o] = 0;
+    free(text);
+    return out;
+}
+
+char *dsl_c_grouping(const char *text) {
+    return dsl_c_split_sign_pairs(dsl_c_grouping_raw(text));
 }
 
 bool dsl_lower_comparisons(me_dsl_program *program, const char *source, me_dsl_error *error) {

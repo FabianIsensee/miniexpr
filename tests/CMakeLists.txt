@@ -8,7 +8,7 @@ if(NOT EMSCRIPTEN)
     find_program(MINIEXPR_MENUDET_CC NAMES cc clang gcc)
   endif()
   set(MINIEXPR_MENUDET_CASES affine chains loops int32 int64 float32 bool compare special_floats flow
-                     boolean_results cast_int math
+                     boolean_results cast_int math power_precedence
                      division_int division_bool division_literals division_locals division_loop division_float32
                      division_condition
                      cast_argument_int cast_argument_bool cast_argument_nested

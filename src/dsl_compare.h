@@ -21,5 +21,10 @@ void dsl_stmt_free(me_dsl_stmt *stmt);
 void dsl_block_free(me_dsl_block *block);
 bool dsl_block_push(me_dsl_block *block, me_dsl_stmt *stmt, me_dsl_error *error);
 bool dsl_lower_comparisons(me_dsl_program *program, const char *source, me_dsl_error *error);
+/* Copy of a DSL expression with parentheses where C would group the Python
+ * source differently (operands of not/!, and &, ^, | operands of comparisons),
+ * for the JIT C generator, which emits expression text. Text this parser does
+ * not handle is copied unchanged. NULL only when out of memory. */
+char *dsl_c_grouping(const char *text);
 
 #endif

@@ -183,8 +183,13 @@ before interpreter compilation or JIT IR construction. C callers can therefore
 pass raw chain syntax to `me_compile()` or `me_compile_nd_jit()` inside a DSL
 kernel (`def ...`), without Python rewriting. Generated temporaries avoid names
 in the source and infer operand types independently of the output dtype.
-Existing DSL `and`/`or` Boolean-result rules apply. The separate classic
-expression API retains its existing comparison semantics.
+Existing DSL `and`/`or` Boolean-result rules apply. The classic expression API
+(a plain expression, no `def`) chains comparisons too, element-wise: `a < b < c`
+is `(a < b) and (b < c)`; there, every operand is evaluated for every element.
+
+Operator precedence follows Python (see "Operator Precedence" in
+[README_DEVELOPERS.md](../README_DEVELOPERS.md)): `-x ** 2` is `-(x ** 2)` and
+`a ** b ** c` is `a ** (b ** c)`.
 
 Chaining does not expand the supported operand types or functions: existing
 string-comparison and per-element reduction restrictions still apply.
