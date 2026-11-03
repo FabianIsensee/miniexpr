@@ -486,21 +486,26 @@ static bool me_jit_expr_contains_unsupported_tokens(const char *expr, me_dtype d
             quote = c;
             continue;
         }
-#if defined(__EMSCRIPTEN__)
-        /* The wasm32 source adapter narrows int64_t casts and int() helper
-         * results to 32 bits. Never silently truncate valid DSL int() values:
-         * retain interpreter semantics until that backend supports exact i64
-         * casts. Filter before both typed lowering and hybrid-plan selection. */
         if (isalpha((unsigned char)c) || c == '_') {
             const char *end = p + 1;
             while (isalnum((unsigned char)*end) || *end == '_') end++;
             const char *next = end;
             while (isspace((unsigned char)*next)) next++;
+            /* remainder() lowers to a double helper. Integral and Boolean
+             * expressions keep the interpreter's exact integer floor modulo
+             * (x % 0 == 0, no precision loss), which a double cannot give. */
+            if (end - p == 9 && !strncmp(p, "remainder", 9) && *next == '(' &&
+                dtype != ME_FLOAT32 && dtype != ME_FLOAT64) return true;
+#if defined(__EMSCRIPTEN__)
+            /* The wasm32 source adapter narrows int64_t casts and int() helper
+             * results to 32 bits. Never silently truncate valid DSL int() values:
+             * retain interpreter semantics until that backend supports exact i64
+             * casts. Filter before both typed lowering and hybrid-plan selection. */
             if (end - p == 3 && !strncmp(p, "int", 3) && *next == '(') return true;
+#endif
             p = end - 1;
             continue;
         }
-#endif
         if (c == '*') {
             if (p[1] == '*') {
                 return true;
@@ -627,6 +632,10 @@ static const char *me_jit_function_name_rewrite(const char *start, size_t ident_
     }
     if (me_jit_ident_equals(start, ident_len, "square")) {
         return "me_jit_square";
+    }
+    /* NumPy floor modulo, not C99 remainder(); fmod stays libc fmod. */
+    if (me_jit_ident_equals(start, ident_len, "remainder")) {
+        return "me_jit_remainder";
     }
     if (me_jit_ident_equals(start, ident_len, "fac")) {
         return "me_jit_fac";
@@ -3430,6 +3439,14 @@ bool me_dsl_jit_codegen_c(const me_dsl_jit_ir_program *program, me_dtype output_
         !me_jit_emit_line(&ctx.source, 0, "static double me_jit_square(double x) { return x * x; }") ||
         !me_jit_emit_line(&ctx.source, 0, "static double me_jit_real(double x) { return x; }") ||
         !me_jit_emit_line(&ctx.source, 0, "static double me_jit_imag(double x) { (void)x; return 0.0; }") ||
+        /* NumPy floor modulo: a copy of me_floor_mod_f64 (me_floor_mod.h).
+           Zero and sign tests read the bits, so NaN results also survive
+           -ffast-math kernels. */
+        !me_jit_emit_line(&ctx.source, 0,
+                          "static double me_jit_remainder(double a, double b) { "
+                          "union { double d; unsigned long long u; } r, s; r.d = fmod(a, b); s.d = b; "
+                          "if ((r.u << 1) == 0ULL) { r.u = s.u & 0x8000000000000000ULL; return r.d; } "
+                          "return ((r.u ^ s.u) >> 63) ? r.d + b : r.d; }") ||
         /* No <math.h> here, so NAN/INFINITY come from their bit patterns:
            arithmetic like 0.0/0.0 would not survive -ffast-math kernels. */
         !me_jit_emit_line(&ctx.source, 0,
