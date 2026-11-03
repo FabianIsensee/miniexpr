@@ -4,6 +4,11 @@ Release notes for miniexpr
 Changes from 0.2.0 to 0.2.1
 ===========================
 
+* Inferred dtypes of power, `square()`, `%`, `fmod()` and `remainder()` of bool
+  operands follow NumPy, which has no bool loop for them: `bool ** bool`,
+  `bool ** 2` (NumPy squares), `square(bool)` and `bool % bool` are int8, and
+  `bool ** 3` is int64. They were bool. Values are unchanged.
+
 * An integer or bool base with a float exponent of 2.0 or 3.0 computes in
   float64, as in NumPy: `int32 ** 3.0` of 2000 is 8e9. `optimize()` rewrites
   these powers to products, which kept the integer dtype and overflowed
