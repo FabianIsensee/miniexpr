@@ -140,6 +140,8 @@ bool is_string_producing_node(const me_expr* n);
 me_dtype string_family_of(const me_expr* n);
 bool string_families_mixed(const me_expr* n);
 bool retag_string_concat(me_expr* node);
+void retag_bool_arithmetic(me_expr* n);
+void retag_logical_bool(me_expr* node);
 size_t infer_output_itemsize(const me_expr* n);
 me_dtype infer_output_type(const me_expr* n);
 me_dtype infer_result_type(const me_expr* n);

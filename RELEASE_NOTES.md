@@ -34,6 +34,10 @@ Changes from 0.2.0 to 0.2.1
   in NumPy (int / int was computed in integer arithmetic, and bool / bool could
   raise SIGFPE).
 
+* Behaviour change: in expressions, bool + bool is logical or and bool * bool
+  is logical and, as for NumPy bool arrays (they were added as int8, so
+  `(p + q) * 1.5` gave 3.0). DSL kernels keep Python's numeric bools.
+
 * Expression trees are retyped after parsing and optimization, so mixed-dtype
   expressions no longer convert values between buffers of the wrong dtype
   (wrong results and heap overflows such as int16 `(i + i) * abs(i)`), and a
