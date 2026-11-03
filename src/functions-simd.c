@@ -11,6 +11,7 @@
 #include "functions.h"
 #include "functions-simd.h"
 #include "dsl_config.h"
+#include "me_floor_mod.h"
 #include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -28,6 +29,11 @@
 
 #if defined(_MSC_VER)
 #include <intrin.h>
+#endif
+
+#if (defined(__ARM_NEON) || defined(__ARM_NEON__)) && defined(__aarch64__)
+#include <arm_neon.h>
+#define ME_FLOOR_MOD_NEON 1
 #endif
 
 #if defined(_MSC_VER) && !defined(__clang__)
@@ -2237,6 +2243,51 @@ static ME_AVX2_TARGET void vec_fmod_f32_avx2(const float* a, const float* b, flo
     }
 }
 
+/* NumPy floor modulo (me_floor_mod.h) in registers: fmod's result r gains b
+ * where the signs of r and b differ; a zero r (tested last, quietly) takes b's
+ * sign; a NaN r stays NaN. Other lanes add +0, never a spurious sum. */
+static ME_AVX2_TARGET void vec_floor_mod_avx2(const double* a, const double* b, double* out, int n) {
+    int i = 0;
+    const int limit = n & ~3;
+    const vdouble zero = vcast_vd_d(0.0);
+    const vmask sign = vreinterpret_vm_vd(vcast_vd_d(-0.0));
+    for (; i < limit; i += 4) {
+        vdouble va = vloadu_vd_p(a + i);
+        vdouble vb = vloadu_vd_p(b + i);
+        vdouble r = xfmod(va, vb);
+        vopmask flip = vsignbit_vo_vd(vreinterpret_vd_vm(
+            vxor_vm_vm_vm(vreinterpret_vm_vd(r), vreinterpret_vm_vd(vb))));
+        vdouble moved = vadd_vd_vd_vd(r, vsel_vd_vo_vd_vd(flip, vb, zero));
+        vdouble signed_zero = vreinterpret_vd_vm(vand_vm_vm_vm(vreinterpret_vm_vd(vb), sign));
+        r = vsel_vd_vo_vd_vd(veq_vo_vd_vd(r, zero), signed_zero, moved);
+        vstoreu_v_p_vd(out + i, r);
+    }
+    for (; i < n; i++) {
+        out[i] = me_floor_mod_f64(a[i], b[i]);
+    }
+}
+
+static ME_AVX2_TARGET void vec_floor_mod_f32_avx2(const float* a, const float* b, float* out, int n) {
+    int i = 0;
+    const int limit = n & ~7;
+    const vfloat zero = vcast_vf_f(0.0f);
+    const vmask sign = vreinterpret_vm_vf(vcast_vf_f(-0.0f));
+    for (; i < limit; i += 8) {
+        vfloat va = vloadu_vf_p(a + i);
+        vfloat vb = vloadu_vf_p(b + i);
+        vfloat r = xfmodf(va, vb);
+        vopmask flip = vsignbit_vo_vf(vreinterpret_vf_vm(
+            vxor_vm_vm_vm(vreinterpret_vm_vf(r), vreinterpret_vm_vf(vb))));
+        vfloat moved = vadd_vf_vf_vf(r, vsel_vf_vo_vf_vf(flip, vb, zero));
+        vfloat signed_zero = vreinterpret_vf_vm(vand_vm_vm_vm(vreinterpret_vm_vf(vb), sign));
+        r = vsel_vf_vo_vf_vf(veq_vo_vf_vf(r, zero), signed_zero, moved);
+        vstoreu_v_p_vf(out + i, r);
+    }
+    for (; i < n; i++) {
+        out[i] = me_floor_mod_f32(a[i], b[i]);
+    }
+}
+
 static ME_AVX2_TARGET void vec_hypot_avx2(const double* a, const double* b, double* out, int n) {
     const int use_u35 = me_simd_use_u35_active();
     int i = 0;
@@ -3709,6 +3760,8 @@ static me_vec_binary_f64 vec_fdim_impl = vec_fdim_scalar;
 static me_vec_binary_f64 vec_fmax_impl = vec_fmax_scalar;
 static me_vec_binary_f64 vec_fmin_impl = vec_fmin_scalar;
 static me_vec_binary_f64 vec_fmod_impl = vec_fmod_scalar;
+/* NULL: floor modulo runs vec_fmod_impl in tiles plus the scalar fixup. */
+static me_vec_binary_f64 vec_floor_mod_impl = NULL;
 static me_vec_binary_f64 vec_hypot_impl = vec_hypot_scalar;
 static me_vec_binary_f64 vec_ldexp_impl = vec_ldexp_scalar;
 static me_vec_binary_f64 vec_nextafter_impl = vec_nextafter_scalar;
@@ -3755,6 +3808,7 @@ static me_vec_binary_f32 vec_fdim_f32_impl = vec_fdim_f32_scalar;
 static me_vec_binary_f32 vec_fmax_f32_impl = vec_fmax_f32_scalar;
 static me_vec_binary_f32 vec_fmin_f32_impl = vec_fmin_f32_scalar;
 static me_vec_binary_f32 vec_fmod_f32_impl = vec_fmod_f32_scalar;
+static me_vec_binary_f32 vec_floor_mod_f32_impl = NULL;
 static me_vec_binary_f32 vec_hypot_f32_impl = vec_hypot_f32_scalar;
 static me_vec_binary_f32 vec_ldexp_f32_impl = vec_ldexp_f32_scalar;
 static me_vec_binary_f32 vec_nextafter_f32_impl = vec_nextafter_f32_scalar;
@@ -3808,6 +3862,7 @@ static void me_set_scalar_backend(void) {
     vec_fmax_impl = vec_fmax_scalar;
     vec_fmin_impl = vec_fmin_scalar;
     vec_fmod_impl = vec_fmod_scalar;
+    vec_floor_mod_impl = NULL;
     vec_hypot_impl = vec_hypot_scalar;
     vec_ldexp_impl = vec_ldexp_scalar;
     vec_nextafter_impl = vec_nextafter_scalar;
@@ -3854,6 +3909,7 @@ static void me_set_scalar_backend(void) {
     vec_fmax_f32_impl = vec_fmax_f32_scalar;
     vec_fmin_f32_impl = vec_fmin_f32_scalar;
     vec_fmod_f32_impl = vec_fmod_f32_scalar;
+    vec_floor_mod_f32_impl = NULL;
     vec_hypot_f32_impl = vec_hypot_f32_scalar;
     vec_ldexp_f32_impl = vec_ldexp_f32_scalar;
     vec_nextafter_f32_impl = vec_nextafter_f32_scalar;
@@ -4246,6 +4302,7 @@ static void me_init_simd(void) {
         vec_fmax_impl = vec_fmax_avx2;
         vec_fmin_impl = vec_fmin_avx2;
         vec_fmod_impl = vec_fmod_avx2;
+        vec_floor_mod_impl = vec_floor_mod_avx2;
         vec_hypot_impl = vec_hypot_avx2;
         vec_ldexp_impl = vec_ldexp_avx2;
         vec_nextafter_impl = vec_nextafter_avx2;
@@ -4296,6 +4353,7 @@ static void me_init_simd(void) {
         vec_fmax_f32_impl = vec_fmax_f32_avx2;
         vec_fmin_f32_impl = vec_fmin_f32_avx2;
         vec_fmod_f32_impl = vec_fmod_f32_avx2;
+        vec_floor_mod_f32_impl = vec_floor_mod_f32_avx2;
         vec_hypot_f32_impl = vec_hypot_f32_avx2;
         vec_ldexp_f32_impl = vec_ldexp_f32_avx2;
         vec_nextafter_f32_impl = vec_nextafter_f32_avx2;
@@ -5178,6 +5236,96 @@ void vec_fmod_dispatch(const double* a, const double* b, double* out, int n) {
     vec_fmod_impl(a, b, out, n);
 }
 
+/* NumPy floor modulo: a fused AVX2 kernel, else the selected fmod kernel
+ * (SLEEF AdvSIMD, Accelerate or libm) in tiles plus the sign fixup of
+ * me_floor_mod.h. Tiles keep fmod's result in cache and let out alias a or b.
+ * The libm loop calls fmod through a pointer: GCC on x86-64 expands a direct
+ * fmod() call to an x87 fprem loop, which is slower than the C library's fmod
+ * (both are exact). */
+#define ME_FLOOR_MOD_TILE 256
+
+static double (*volatile me_floor_mod_libm_fmod)(double, double) = fmod;
+static float (*volatile me_floor_mod_libm_fmodf)(float, float) = fmodf;
+
+/* The fixup of a tile, out[i] = fixup(r[i], b[i]); out may alias b. GCC does
+ * not vectorize the float64 scalar form on AArch64 (its masks become a 64-bit
+ * multiply, which NEON lacks), so NEON gets the same masks in registers. */
+static void me_floor_mod_fixup_tile_f64(const double* r, const double* b, double* out, int m) {
+    int i = 0;
+#if defined(ME_FLOOR_MOD_NEON)
+    const uint64x2_t sign = vdupq_n_u64(UINT64_C(1) << 63);
+    for (; i + 2 <= m; i += 2) {
+        const float64x2_t vr = vld1q_f64(r + i);
+        const uint64x2_t ru = vreinterpretq_u64_f64(vr);
+        const uint64x2_t bu = vreinterpretq_u64_f64(vld1q_f64(b + i));
+        const uint64x2_t zero = vceqzq_f64(vr);
+        const uint64x2_t flip = vbicq_u64(
+            vreinterpretq_u64_s64(vshrq_n_s64(vreinterpretq_s64_u64(veorq_u64(ru, bu)), 63)), zero);
+        const float64x2_t moved = vaddq_f64(vr, vreinterpretq_f64_u64(vandq_u64(bu, flip)));
+        vst1q_f64(out + i, vreinterpretq_f64_u64(
+            vbslq_u64(zero, vandq_u64(bu, sign), vreinterpretq_u64_f64(moved))));
+    }
+#endif
+IVDEP
+    for (; i < m; i++) {
+        out[i] = me_floor_mod_fixup_f64(r[i], b[i]);
+    }
+}
+
+static void me_floor_mod_fixup_tile_f32(const float* r, const float* b, float* out, int m) {
+    int i = 0;
+#if defined(ME_FLOOR_MOD_NEON)
+    const uint32x4_t sign = vdupq_n_u32(UINT32_C(0x80000000));
+    for (; i + 4 <= m; i += 4) {
+        const float32x4_t vr = vld1q_f32(r + i);
+        const uint32x4_t ru = vreinterpretq_u32_f32(vr);
+        const uint32x4_t bu = vreinterpretq_u32_f32(vld1q_f32(b + i));
+        const uint32x4_t zero = vceqzq_f32(vr);
+        const uint32x4_t flip = vbicq_u32(
+            vreinterpretq_u32_s32(vshrq_n_s32(vreinterpretq_s32_u32(veorq_u32(ru, bu)), 31)), zero);
+        const float32x4_t moved = vaddq_f32(vr, vreinterpretq_f32_u32(vandq_u32(bu, flip)));
+        vst1q_f32(out + i, vreinterpretq_f32_u32(
+            vbslq_u32(zero, vandq_u32(bu, sign), vreinterpretq_u32_f32(moved))));
+    }
+#endif
+IVDEP
+    for (; i < m; i++) {
+        out[i] = me_floor_mod_fixup_f32(r[i], b[i]);
+    }
+}
+
+static void vec_floor_mod_fmod_libm(const double* a, const double* b, double* out, int n) {
+    double (*fn)(double, double) = me_floor_mod_libm_fmod;
+    for (int i = 0; i < n; i++) {
+        out[i] = fn(a[i], b[i]);
+    }
+}
+
+static void vec_floor_mod_fmod_libm_f32(const float* a, const float* b, float* out, int n) {
+    float (*fn)(float, float) = me_floor_mod_libm_fmodf;
+    for (int i = 0; i < n; i++) {
+        out[i] = fn(a[i], b[i]);
+    }
+}
+
+void vec_floor_mod_dispatch(const double* a, const double* b, double* out, int n) {
+    me_vec_binary_f64 fmod_impl = vec_floor_mod_fmod_libm;
+    if (!me_simd_force_scalar) {
+        me_init_simd();
+        if (vec_floor_mod_impl) {
+            vec_floor_mod_impl(a, b, out, n);
+            return;
+        }
+        if (vec_fmod_impl != vec_fmod_scalar) fmod_impl = vec_fmod_impl;
+    }
+    double r[ME_FLOOR_MOD_TILE];
+    for (int start = 0; start < n; start += ME_FLOOR_MOD_TILE) {
+        const int m = n - start < ME_FLOOR_MOD_TILE ? n - start : ME_FLOOR_MOD_TILE;
+        fmod_impl(a + start, b + start, r, m);
+        me_floor_mod_fixup_tile_f64(r, b + start, out + start, m);
+    }
+}
+
 void vec_hypot_dispatch(const double* a, const double* b, double* out, int n) {
     if (me_simd_force_scalar) {
         vec_hypot_scalar(a, b, out, n);
@@ -5527,6 +5675,24 @@ void vec_fmod_f32_dispatch(const float* a, const float* b, float* out, int n) {
     }
     me_init_simd();
     vec_fmod_f32_impl(a, b, out, n);
+}
+
+void vec_floor_mod_f32_dispatch(const float* a, const float* b, float* out, int n) {
+    me_vec_binary_f32 fmod_impl = vec_floor_mod_fmod_libm_f32;
+    if (!me_simd_force_scalar) {
+        me_init_simd();
+        if (vec_floor_mod_f32_impl) {
+            vec_floor_mod_f32_impl(a, b, out, n);
+            return;
+        }
+        if (vec_fmod_f32_impl != vec_fmod_f32_scalar) fmod_impl = vec_fmod_f32_impl;
+    }
+    float r[ME_FLOOR_MOD_TILE];
+    for (int start = 0; start < n; start += ME_FLOOR_MOD_TILE) {
+        const int m = n - start < ME_FLOOR_MOD_TILE ? n - start : ME_FLOOR_MOD_TILE;
+        fmod_impl(a + start, b + start, r, m);
+        me_floor_mod_fixup_tile_f32(r, b + start, out + start, m);
+    }
 }
 
 void vec_hypot_f32_dispatch(const float* a, const float* b, float* out, int n) {

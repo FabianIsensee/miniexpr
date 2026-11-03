@@ -48,6 +48,8 @@ For log = base 10 log comment the next line. */
 
 #include "functions.h"
 #include "functions-simd.h"
+#include "me_floor_mod.h"
+#include "dsl_menudet_types.h"
 #include "unicode_case_table.h"
 #include <stdbool.h>
 #include <stdlib.h>
@@ -433,6 +435,14 @@ static double numpy_isnan(double x) { return isnan(x); }
 static double numpy_signbit(double x) { return signbit(x) != 0; }
 static double numpy_fabs(double x) { return fabs(x); }
 
+/* `%` and remainder(): NumPy floor modulo (np.remainder), the sign of the
+ * divisor, not C's fmod (sign of the dividend) or C99 remainder() (quotient
+ * rounded to nearest). fmod() stays C fmod, as np.fmod. Earlier versions gave
+ * `%` C fmod and remainder() C99 remainder(). The typed kernels dispatch on this
+ * identity to exact per-dtype loops; this callback serves constant folding and
+ * the generic fallback. */
+static double numpy_remainder(double a, double b) { return me_floor_mod_f64(a, b); }
+
 static const me_variable functions[] = {
     /* must be in alphabetical order */
     /* Format: {name, dtype, address, type, context} */
@@ -510,7 +520,7 @@ static const me_variable functions[] = {
     {"power", 0, pow, ME_FUNCTION2 | ME_FLAG_PURE, 0},  /* NumPy's spelling of pow */
     {"prod", 0, prod_reduce, ME_FUNCTION1, 0},
     {"real", 0, real_wrapper, ME_FUNCTION1 | ME_FLAG_PURE, 0},
-    {"remainder", 0, remainder, ME_FUNCTION2 | ME_FLAG_PURE, 0},
+    {"remainder", 0, numpy_remainder, ME_FUNCTION2 | ME_FLAG_PURE, 0},
     {"removeprefix", 0, str_removeprefix, ME_FUNCTION2 | ME_FLAG_PURE, 0},
     {"removesuffix", 0, str_removesuffix, ME_FUNCTION2 | ME_FLAG_PURE, 0},
     {"replace", 0, str_replace, ME_FUNCTION3 | ME_FLAG_PURE, 0},
@@ -4537,7 +4547,7 @@ static void handle_single_char_operator(state* s, char c) {
         }
         break;
     case '%': s->type = TOK_INFIX;
-        s->function = dsl_menudet_typed_profile(s->semantic_profile) ? menudet_modulo : fmod;
+        s->function = dsl_menudet_typed_profile(s->semantic_profile) ? menudet_modulo : numpy_remainder;
         break;
     case '&': s->type = TOK_BITWISE;
         s->function = bit_and;
@@ -4965,7 +4975,7 @@ static me_expr* term(state* s) {
     CHECK_NULL(ret);
 
     while (s->type == TOK_INFIX && (s->function == mul || s->function == divide ||
-                                  s->function == fmod || s->function == menudet_modulo ||
+                                  s->function == numpy_remainder || s->function == menudet_modulo ||
                                   s->function == menudet_floordiv)) {
         me_fun2 t = (me_fun2)s->function;
         next_token(s);
@@ -6357,6 +6367,22 @@ static void eval_dsl_strict_f32_math(const me_expr *node, me_dtype output_dtype)
 #define ME_EVAL_IS_COMPLEX_c64 1
 #define ME_EVAL_IS_COMPLEX_c128 1
 
+/* NumPy floor modulo per evaluator dtype (me_floor_mod.h). The i8 evaluator
+ * also runs bool nodes, whose 0/1 values take the int8 rule. Complex `%` is
+ * rejected at compile time; its entries only keep the template compiling. */
+#define FLOOR_MOD_f32(a, b) me_floor_mod_f32((a), (b))
+#define FLOOR_MOD_f64(a, b) me_floor_mod_f64((a), (b))
+#define FLOOR_MOD_i8(a, b) me_floor_mod_i8((a), (b))
+#define FLOOR_MOD_i16(a, b) me_floor_mod_i16((a), (b))
+#define FLOOR_MOD_i32(a, b) me_floor_mod_i32((a), (b))
+#define FLOOR_MOD_i64(a, b) me_floor_mod_i64((a), (b))
+#define FLOOR_MOD_u8(a, b) me_floor_mod_u8((a), (b))
+#define FLOOR_MOD_u16(a, b) me_floor_mod_u16((a), (b))
+#define FLOOR_MOD_u32(a, b) me_floor_mod_u32((a), (b))
+#define FLOOR_MOD_u64(a, b) me_floor_mod_u64((a), (b))
+#define FLOOR_MOD_c64(a, b) ((void)(b), (a))
+#define FLOOR_MOD_c128(a, b) ((void)(b), (a))
+
 /* A nested conversion may be dispatched by its parent's typed evaluator, whose
  * output buffer width differs from the conversion node's declared dtype. */
 #define ME_EVAL_DTYPE_f32 ME_FLOAT32
@@ -6371,6 +6397,18 @@ static void eval_dsl_strict_f32_math(const me_expr *node, me_dtype output_dtype)
 #define ME_EVAL_DTYPE_u64 ME_UINT64
 #define ME_EVAL_DTYPE_c64 ME_COMPLEX64
 #define ME_EVAL_DTYPE_c128 ME_COMPLEX128
+
+/* Whether a constant operand of % or remainder() can be used in `dtype`:
+ * floats round it (as NumPy rounds a Python float to float32), integers must
+ * hold it exactly, checked without converting an out-of-range double. */
+static bool me_floor_mod_constant_fits(double value, me_dtype dtype) {
+    int64_t s_value;
+    uint64_t u_value;
+    if (dtype == ME_FLOAT32 || dtype == ME_FLOAT64) return true;
+    if (value != trunc(value)) return false;
+    return dsl_menudet_float_to_signed(dtype, value, &s_value) == ME_MENUDET_NUMERIC_OK ||
+           dsl_menudet_float_to_unsigned(dtype, value, &u_value) == ME_MENUDET_NUMERIC_OK;
+}
 
 #define DEFINE_ME_EVAL(SUFFIX, TYPE, VEC_ADD, VEC_SUB, VEC_MUL, VEC_DIV, VEC_POW, \
     VEC_ADD_SCALAR, VEC_MUL_SCALAR, VEC_POW_SCALAR, \
@@ -6652,9 +6690,41 @@ static void me_eval_##SUFFIX(const me_expr *n) { \
                     } else { \
                         goto general_case_binary_##SUFFIX; \
                     } \
-                } else if (func == (me_fun2)remainder) { \
-                    if (ldata && rdata && HAS_VEC_MATH) { \
+                } else if (func == (me_fun2)numpy_remainder && !ME_EVAL_IS_COMPLEX_##SUFFIX) { \
+                    /* NumPy floor modulo in the node's dtype. Floats use the \
+                     * fmod vector kernel plus the sign fixup, which allows out \
+                     * to alias an operand; a constant is broadcast into output \
+                     * unless output is the array operand itself (an in-place \
+                     * DSL local), which then takes the element loops below. \
+                     * Integers use exact loops (no trap on x % 0 or MIN % -1). \
+                     * An integer constant that TYPE does not hold keeps the \
+                     * double fallback. */ \
+                    const bool lconst = left->type == ME_CONSTANT && \
+                        me_floor_mod_constant_fits(left->value, ME_EVAL_DTYPE_##SUFFIX); \
+                    const bool rconst = right->type == ME_CONSTANT && \
+                        me_floor_mod_constant_fits(right->value, ME_EVAL_DTYPE_##SUFFIX); \
+                    if (HAS_VEC_MATH && ldata && rdata) { \
                         VEC_REMAINDER(ldata, rdata, output, n->nitems); \
+                    } else if (HAS_VEC_MATH && ldata && rconst && (const TYPE*)output != ldata) { \
+                        for (i = 0; i < n->nitems; i++) output[i] = TO_TYPE_##SUFFIX(right->value); \
+                        VEC_REMAINDER(ldata, output, output, n->nitems); \
+                    } else if (HAS_VEC_MATH && lconst && rdata && (const TYPE*)output != rdata) { \
+                        for (i = 0; i < n->nitems; i++) output[i] = TO_TYPE_##SUFFIX(left->value); \
+                        VEC_REMAINDER(output, rdata, output, n->nitems); \
+                    } else if (ldata && rdata) { \
+                        for (i = 0; i < n->nitems; i++) { \
+                            output[i] = FLOOR_MOD_##SUFFIX(ldata[i], rdata[i]); \
+                        } \
+                    } else if (ldata && rconst) { \
+                        const TYPE b = TO_TYPE_##SUFFIX(right->value); \
+                        for (i = 0; i < n->nitems; i++) { \
+                            output[i] = FLOOR_MOD_##SUFFIX(ldata[i], b); \
+                        } \
+                    } else if (lconst && rdata) { \
+                        const TYPE a = TO_TYPE_##SUFFIX(left->value); \
+                        for (i = 0; i < n->nitems; i++) { \
+                            output[i] = FLOOR_MOD_##SUFFIX(a, rdata[i]); \
+                        } \
                     } else { \
                         goto general_case_binary_##SUFFIX; \
                     } \
@@ -7008,7 +7078,7 @@ static void me_eval_##SUFFIX(const me_expr *n) { \
 #define vec_hypot(a, b, out, n) vec_hypot_dispatch((a), (b), (out), (n))
 #define vec_ldexp(a, b, out, n) vec_ldexp_dispatch((a), (b), (out), (n))
 #define vec_nextafter(a, b, out, n) vec_nextafter_dispatch((a), (b), (out), (n))
-#define vec_remainder(a, b, out, n) vec_remainder_dispatch((a), (b), (out), (n))
+#define vec_floor_mod(a, b, out, n) vec_floor_mod_dispatch((a), (b), (out), (n))
 #define vec_fma(a, b, c, out, n) vec_fma_dispatch((a), (b), (c), (out), (n))
 #define vec_fma_unused(a, b, c, out, n) do { for (int _i = 0; _i < (n); _i++) (out)[_i] = (a)[_i]; } while(0)
 #define vec_negate(a, out, n) do { for (int _i = 0; _i < (n); _i++) (out)[_i] = -(a)[_i]; } while(0)
@@ -7064,7 +7134,7 @@ static void me_eval_##SUFFIX(const me_expr *n) { \
 #define vec_hypot_f32(a, b, out, n) vec_hypot_f32_dispatch((a), (b), (out), (n))
 #define vec_ldexp_f32(a, b, out, n) vec_ldexp_f32_dispatch((a), (b), (out), (n))
 #define vec_nextafter_f32(a, b, out, n) vec_nextafter_f32_dispatch((a), (b), (out), (n))
-#define vec_remainder_f32(a, b, out, n) vec_remainder_f32_dispatch((a), (b), (out), (n))
+#define vec_floor_mod_f32(a, b, out, n) vec_floor_mod_f32_dispatch((a), (b), (out), (n))
 #define vec_fma_f32(a, b, c, out, n) vec_fma_f32_dispatch((a), (b), (c), (out), (n))
 #define vec_negame_f32(a, out, n) do { for (int _i = 0; _i < (n); _i++) (out)[_i] = -(a)[_i]; } while(0)
 
@@ -7202,7 +7272,7 @@ DEFINE_ME_EVAL(f32, float,
                vec_cbrt_f32, vec_erf_f32, vec_erfc_f32, vec_sinpi_f32, vec_cospi_f32,
                vec_tgamma_f32, vec_lgamma_f32, vec_rint_f32,
                vec_copysign_f32, vec_fdim_f32, vec_fmax_f32, vec_fmin_f32, vec_fmod_f32, vec_hypot_f32, vec_ldexp_f32,
-               vec_nextafter_f32, vec_remainder_f32, vec_fma_f32,
+               vec_nextafter_f32, vec_floor_mod_f32, vec_fma_f32,
                vec_negame_f32,
                sqrtf, sinf, cosf, tanf, asinf, acosf, atanf,
                expf, logf, log10f, log1pf, log2f, expm1f, exp2f, exp10_wrapper,
@@ -7228,7 +7298,7 @@ DEFINE_ME_EVAL(f64, double,
                vec_cbrt, vec_erf, vec_erfc, vec_sinpi, vec_cospi,
                vec_tgamma, vec_lgamma, vec_rint,
                vec_copysign, vec_fdim, vec_fmax, vec_fmin, vec_fmod, vec_hypot, vec_ldexp,
-               vec_nextafter, vec_remainder, vec_fma,
+               vec_nextafter, vec_floor_mod, vec_fma,
                vec_negate,
                sqrt, sin, cos, tan, asin, acos, atan,
                exp, log, log10, log1p, log2, expm1, exp2, exp10_wrapper,

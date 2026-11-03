@@ -27,6 +27,22 @@ Mixing modes causes compilation to fail.
 - `jit_mode = 1` (`ME_JIT_ON`): prefer runtime JIT preparation.
 - `jit_mode = 2` (`ME_JIT_OFF`): skip runtime JIT preparation at compile time.
 
+### Modulo: `%`, `remainder()`, `fmod()`
+
+`%` and `remainder(a, b)` are NumPy's floor modulo (`np.remainder`, `np.mod`,
+Python `%`): the result takes the sign of the divisor.
+
+- Floating point: `fmod(a, b)`, moved by `b` when its sign differs from `b`'s;
+  a zero result takes the sign of `b`. `x % 0`, `x % nan` and `inf % y` are
+  NaN; a nonzero finite `x % inf` is `x` when the signs agree, else `inf` with `b`'s sign, and a zero `x` gives a zero with `b`'s sign.
+- Integers (all widths, signed and unsigned): exact in the operand width;
+  `x % 0` is 0 and `MIN % -1` is 0 (NumPy; C would trap). Boolean operands
+  take the integer rule on 0/1, so `bool % bool` is always 0.
+- `fmod(a, b)` stays C `fmod` (`np.fmod`, sign of the dividend).
+
+Before 0.2.1, `%` was C `fmod` and `remainder()` was C99 `remainder()`
+(quotient rounded to nearest).
+
 ### ND/Padded Block Notes
 
 - `shape`, `chunkshape`, and `blockshape` are C-order arrays.
