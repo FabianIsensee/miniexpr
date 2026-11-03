@@ -37,6 +37,9 @@ typedef struct state {
     size_t itemsize;
     const uint32_t* str_data;
     size_t str_len;
+    /* The last FUNCTION0 token was a pure builtin (pi, e) of the full
+     * language; its token type leaves out the pure flag. */
+    bool function0_pure;
 
     const me_variable* lookup;
     int lookup_len;

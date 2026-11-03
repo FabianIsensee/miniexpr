@@ -36,10 +36,8 @@
 
 /* COMPILE TIME OPTIONS */
 
-/* Exponentiation associativity:
-For a**b**c = (a**b)**c and -a**b = (-a)**b do nothing.
-For a**b**c = a**(b**c) and -a**b = -(a**b) uncomment the next line.*/
-/* #define ME_POW_FROM_RIGHT */
+/* Exponentiation follows Python: a**b**c = a**(b**c) and -a**b = -(a**b)
+(grammar in functions.c, above list()). */
 
 /* Logarithms
 For log = natural log do nothing (NumPy compatible)
@@ -1604,6 +1602,7 @@ int private_compile_profile_ex(const char* expression, const me_variable* variab
 
     state s;
     s.semantic_profile = profile;
+    s.function0_pure = false;
     s.start = s.next = expression;
     s.lookup = vars_copy ? vars_copy : variables;
     s.lookup_len = var_count;

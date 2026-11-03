@@ -27,6 +27,37 @@ Mixing modes causes compilation to fail.
 - `jit_mode = 1` (`ME_JIT_ON`): prefer runtime JIT preparation.
 - `jit_mode = 2` (`ME_JIT_OFF`): skip runtime JIT preparation at compile time.
 
+### Operator Precedence
+
+Expressions (and DSL expressions, which use the same grammar) follow Python's
+operator precedence and associativity, from loosest to tightest:
+
+| Operators | Notes |
+|---|---|
+| `or`, `\|\|` | |
+| `and`, `&&` | |
+| `not`, `!` | `not a == b` is `not (a == b)` |
+| `<`, `<=`, `>`, `>=`, `==`, `!=` | chain as in Python |
+| `\|` | |
+| `^` | |
+| `&` | `a < b & c` is `a < (b & c)` |
+| `<<`, `>>` | |
+| `+`, `-` | left-associative |
+| `*`, `/`, `%` (and `//` in Menudet kernels) | left-associative |
+| unary `-`, `+`, `~` | |
+| `**` | right-associative |
+
+`**` binds tighter than a unary operator on its left but not on its right, as in
+Python: `-x ** 2` is `-(x ** 2)`, `2 ** -1` is `2 ** (-1)`, and `a ** b ** c` is
+`a ** (b ** c)`. A comparison chain is evaluated element-wise like Python's:
+`a < b <= c` is `(a < b) and (b <= c)`. A function argument is a full
+expression, so `where(a > 0 and not b, x, y)` needs no extra parentheses.
+
+Behaviour change: earlier versions kept tinyexpr's rules here, parsing `-x ** 2`
+as `(-x) ** 2`, `a ** b ** c` as `(a ** b) ** c` and (outside DSL kernels)
+`a < b < c` as `(a < b) < c`. Parenthesize explicitly to keep the old meaning,
+e.g. `(-x) ** 2`.
+
 ### ND/Padded Block Notes
 
 - `shape`, `chunkshape`, and `blockshape` are C-order arrays.
