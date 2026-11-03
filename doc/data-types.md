@@ -10,6 +10,8 @@ miniexpr automatically promotes types when necessary. The general promotion hier
 - Real types → Complex types (when complex is involved)
 - True division (`/`) and `atan2`, `copysign`, `hypot`, `logaddexp`, `nextafter` of integer or bool
   operands compute in float64, as in NumPy
+- In expressions, bool + bool stays bool and is logical or, bool * bool is logical and (NumPy);
+  DSL kernels keep Python's numeric bools (`True + True == 2`)
 
 **Windows**: Building requires clang-cl; complex64 and complex128 are supported, including portable interpretation. DSL JIT complex kernels remain unsupported on all platforms.
 

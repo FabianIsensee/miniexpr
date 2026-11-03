@@ -116,7 +116,10 @@ enum {
     ME_EXPR_FLAG_INEXACT_LITERAL = 1u << 22,
     /* A function bound by the caller's variables, not a builtin: it keeps
      * the dtype it was registered with, or for ME_AUTO its parse-time one. */
-    ME_EXPR_FLAG_USER_FUNCTION = 1u << 23
+    ME_EXPR_FLAG_USER_FUNCTION = 1u << 23,
+    /* A product optimize() made from x ** 2 or x ** 3. Of bools it is a
+     * number (int8, as NumPy's bool ** 2), not a logical and. */
+    ME_EXPR_FLAG_POWER_PRODUCT = 1u << 24
 };
 
 /* Check if a pointer is a synthetic address (used internally for chunked evaluation).
@@ -153,6 +156,8 @@ bool is_string_producing_node(const me_expr* n);
 me_dtype string_family_of(const me_expr* n);
 bool string_families_mixed(const me_expr* n);
 bool retag_string_concat(me_expr* node);
+bool retag_bool_arithmetic(me_expr* n);
+void retag_logical_bool(me_expr* node);
 size_t infer_output_itemsize(const me_expr* n);
 me_dtype infer_output_type(const me_expr* n);
 me_dtype infer_result_type(const me_expr* n);
@@ -175,6 +180,8 @@ bool is_float_result_binary_function(const void* func);
 /* The `%` operator's function (fmod, or NumPy's remainder). */
 bool is_modulo_function(const void* func);
 bool is_ldexp_function(const void* func);
+/* square(), whose bool result NumPy computes in int8. */
+bool is_square_function(const void* func);
 size_t dtype_size(me_dtype dtype);
 bool has_complex_input_types(const me_expr* n);
 bool has_unsupported_complex_function(const me_expr* n);

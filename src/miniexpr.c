@@ -1625,11 +1625,24 @@ static me_dtype retype_value_dtype(const me_expr* n) {
     if (IS_FUNCTION(n->type) && arity == 2 && is_ldexp_function(n->function)) {
         return promote_float_math_result(arg0->dtype);
     }
-    /* Arithmetic of bools must not compute in bool (True + True would store
-     * 2 in a bool): DSL kernels follow Python (int64, True + True == 2),
-     * expressions keep int8 as before. */
-    if (result == ME_BOOL && me_arithmetic_operator(n)) {
+    /* NumPy computes square(), % and ** of bools in int8 (np.square,
+     * np.remainder, np.power), and so the products optimize() made from
+     * bool ** 2, not as a logical and; DSL kernels as Python numbers. */
+    if (result == ME_BOOL && ((n->flags & ME_EXPR_FLAG_POWER_PRODUCT) ||
+                              (arity == 1 && is_square_function(n->function)) ||
+                              (arity == 2 && (is_modulo_function(n->function) || n->function == (void*)pow)))) {
         return (n->flags & ME_EXPR_FLAG_NUMERIC_BOOLS) ? ME_INT64 : ME_INT8;
+    }
+    /* Arithmetic of bools must not compute in bool (True + True would store
+     * 2 in a bool): DSL kernels follow Python (int64, True + True == 2). In
+     * expressions, bool + bool and bool * bool stay bool, which
+     * retag_bool_arithmetic() turns into or/and, as NumPy computes them; the
+     * rest (-, unary -) keeps int8 as before. */
+    if (result == ME_BOOL && me_arithmetic_operator(n)) {
+        if (n->flags & ME_EXPR_FLAG_NUMERIC_BOOLS) return ME_INT64;
+        const char* op = me_arithmetic_operator(n);
+        if (arity == 2 && (op[0] == '+' || op[0] == '*')) return ME_BOOL;
+        return ME_INT8;
     }
     return result;
 }
@@ -1738,6 +1751,7 @@ static bool retype_self(me_expr* n) {
         return false;
     }
     n->dtype = retype_value_dtype(n);
+    retag_logical_bool(n);
     /* A reduction evaluates its argument on its own (eval_reduction()). */
     if (is_reduction_node(n)) {
         return true;
@@ -1864,8 +1878,14 @@ static int private_compile_typed(const char* expression, const me_variable* vari
 /* Plain expressions are NumPy array expressions. */
 int private_compile_ex(const char* expression, const me_variable* variables, int var_count,
                                void* output, int nitems, me_dtype dtype, int* error, me_expr** out) {
-    return private_compile_typed(expression, variables, var_count, output, nitems,
-                                 dtype, ME_DSL_PROFILE_FULL, false, error, out);
+    int rc = private_compile_typed(expression, variables, var_count, output, nitems,
+                                   dtype, ME_DSL_PROFILE_FULL, false, error, out);
+    /* DSL kernels compile through private_compile_profile_ex() and keep
+     * numeric bools. */
+    if (rc == ME_COMPILE_SUCCESS && out) {
+        retag_bool_arithmetic(*out);
+    }
+    return rc;
 }
 
 /* DSL kernel expressions, where bools are Python numbers. */
@@ -3022,9 +3042,21 @@ static int compile_with_jit(const char* expression, const me_variable* variables
     }
 
     /* Optional: auto-lift plain expressions into a synthetic DSL kernel for JIT.
-     * Keep this opt-in to preserve legacy parser semantics by default.
+     * Keep this opt-in to preserve legacy parser semantics by default. A DSL
+     * kernel computes bool + bool and bool * bool as numbers; an expression
+     * that NumPy computes as or/and is not lifted.
      */
+    bool numpy_bool_arithmetic = false;
     if (jit_mode == ME_JIT_ON) {
+        me_expr* probe = NULL;
+        int probe_error = 0;
+        if (private_compile_typed(expression, variables, var_count, NULL, 0, dtype, ME_DSL_PROFILE_FULL, false,
+                                  &probe_error, &probe) == ME_COMPILE_SUCCESS) {
+            numpy_bool_arithmetic = retag_bool_arithmetic(probe);
+        }
+        me_free(probe);
+    }
+    if (jit_mode == ME_JIT_ON && !numpy_bool_arithmetic) {
         me_variable *vars_dsl = NULL;
         if (variables && var_count > 0) {
             vars_dsl = malloc((size_t)var_count * sizeof(*vars_dsl));
