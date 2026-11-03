@@ -4,6 +4,11 @@ Release notes for miniexpr
 Changes from 0.2.0 to 0.2.1
 ===========================
 
+* Behaviour change: true division and `atan2`, `copysign`, `hypot`,
+  `logaddexp`, `nextafter` of integer or bool operands compute in float64, as
+  in NumPy (int / int was computed in integer arithmetic, and bool / bool could
+  raise SIGFPE).
+
 * Expression trees are retyped after parsing and optimization, so mixed-dtype
   expressions no longer convert values between buffers of the wrong dtype
   (wrong results and heap overflows such as int16 `(i + i) * abs(i)`), and a

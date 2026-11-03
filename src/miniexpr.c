@@ -1472,6 +1472,10 @@ static me_dtype retype_value_dtype(const me_expr* n) {
     for (int i = 0; i < arity; i++) {
         result = promote_types(result, ((const me_expr*)n->parameters[i])->dtype);
     }
+    /* int / int is float64 (and so is bool / bool), like hypot(int, int). */
+    if (IS_FUNCTION(n->type) && arity == 2 && is_float_result_binary_function(n->function)) {
+        return promote_float_math_result(result);
+    }
     return result;
 }
 

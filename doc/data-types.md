@@ -8,6 +8,8 @@ miniexpr automatically promotes types when necessary. The general promotion hier
 - Integer types → Float types
 - Lower precision → Higher precision
 - Real types → Complex types (when complex is involved)
+- True division (`/`) and `atan2`, `copysign`, `hypot`, `logaddexp`, `nextafter` of integer or bool
+  operands compute in float64, as in NumPy
 
 **Windows**: Building requires clang-cl; complex64 and complex128 are supported, including portable interpretation. DSL JIT complex kernels remain unsupported on all platforms.
 

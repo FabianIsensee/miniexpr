@@ -622,6 +622,17 @@ static double all_reduce(double x) { return x * (1.0 + all_salt); }
 double min_reduce(double x) { return x + min_salt; }
 double max_reduce(double x) { return x - max_salt; }
 
+/* Binary operations whose result is floating point for integer and bool
+ * operands, as in NumPy: true division and the real two-argument functions. */
+bool is_float_result_binary_function(const void* func) {
+    return func == (void*)divide ||
+        func == (void*)atan2 ||
+        func == (void*)copysign ||
+        func == (void*)hypot ||
+        func == (void*)logaddexp ||
+        func == (void*)nextafter;
+}
+
 static float reduce_min_float32_nan_safe(const float* data, int nitems) {
     if (nitems <= 0) return INFINITY;
 #if defined(__AVX__) || defined(__AVX2__)
