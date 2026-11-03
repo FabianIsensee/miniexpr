@@ -651,6 +651,41 @@ bool is_float_result_binary_function(const void* func) {
         func == (void*)nextafter;
 }
 
+/* Functions whose NumPy ufunc has no bool loop: with bool operands they
+ * compute in int8 (np.square(bool), bool ** bool, np.fmod(bool, bool)). */
+bool is_int8_for_bool_function(const void* func) {
+    return func == (void*)pow ||
+        func == (void*)square ||
+        func == (void*)fmod ||
+        func == (void*)remainder;
+}
+
+/* NumPy computes float_array ** 0.5 as np.sqrt() and float_array ** -1 as
+ * np.reciprocal() (and complex_array ** 0.5 as np.sqrt()): exact, and
+ * (-inf) ** 0.5 is NaN and (-0.0) ** 0.5 is -0.0, where pow() gives inf and
+ * 0.0.  Integer bases keep pow(), as in NumPy.  Rewrites a typed pow node. */
+void rewrite_numpy_scalar_power(me_expr* n) {
+    if (!IS_FUNCTION(n->type) || ARITY(n->type) != 2 || n->function != (void*)pow) return;
+    me_expr* base = (me_expr*)n->parameters[0];
+    me_expr* exponent = (me_expr*)n->parameters[1];
+    if (TYPE_MASK(exponent->type) != ME_CONSTANT) return;
+    const bool real = base->dtype == ME_FLOAT32 || base->dtype == ME_FLOAT64;
+    const bool complex_base = base->dtype == ME_COMPLEX64 || base->dtype == ME_COMPLEX128;
+    if (exponent->value == 0.5 && (real || complex_base)) {
+        me_free(exponent);
+        n->parameters[1] = NULL;
+        n->type = ME_FUNCTION1 | ME_FLAG_PURE;
+        n->function = (void*)sqrt;
+        n->flags |= ME_EXPR_FLAG_FLOAT_MATH;
+    }
+    else if (exponent->value == -1.0 && real) {
+        exponent->value = 1.0;
+        n->parameters[0] = exponent;
+        n->parameters[1] = base;
+        n->function = (void*)divide;
+    }
+}
+
 static float reduce_min_float32_nan_safe(const float* data, int nitems) {
     if (nitems <= 0) return INFINITY;
 #if defined(__AVX__) || defined(__AVX2__)
@@ -10134,9 +10169,18 @@ static void optimize_node(me_expr* n, bool rewrite_pow) {
         }
         /* A constant base is folded below instead: the product rewrite would
          * leave a node with only constant operands (3 * 3), which the vector
-         * kernels do not evaluate. */
-        if (rewrite_pow && !known && IS_FUNCTION(n->type) && arity == 2 && n->function == (void*)pow) {
+         * kernels do not evaluate. A bool base (a comparison has no final
+         * dtype yet) keeps the power, whose dtype the product would lose
+         * (NumPy: bool ** 2 is int8, bool ** 3 is int64). */
+        const me_expr *pow_base = arity == 2 ? (const me_expr*)n->parameters[0] : NULL;
+        while (pow_base && is_conversion_node(pow_base)) pow_base = (const me_expr*)pow_base->parameters[0];
+        const bool bool_base = pow_base && (pow_base->dtype == ME_BOOL || is_comparison_node(pow_base) ||
+                                            is_logical_node(pow_base));
+        if (rewrite_pow && !known && IS_FUNCTION(n->type) && arity == 2 && n->function == (void*)pow &&
+            !bool_base) {
             me_expr *right = (me_expr*)n->parameters[1];
+            const unsigned power_flags =
+                (right && (right->flags & ME_EXPR_FLAG_FLOAT_LITERAL)) ? ME_EXPR_FLAG_FLOAT_POWER : 0;
             if (right && right->type == ME_CONSTANT && right->value == 2.0) {
                 /* Fast path: rewrite x**2 (or pow(x,2)) to x*x to avoid scalar pow in eval. */
                 me_expr *left = (me_expr*)n->parameters[0];
@@ -10145,6 +10189,7 @@ static void optimize_node(me_expr* n, bool rewrite_pow) {
                     me_free(right);
                     n->parameters[1] = left_clone;
                     n->function = mul;
+                    n->flags |= power_flags;
                     apply_type_promotion(n);
                     known = 0;
                 }
@@ -10157,11 +10202,13 @@ static void optimize_node(me_expr* n, bool rewrite_pow) {
                     me_expr *inner = NEW_EXPR(ME_FUNCTION2 | ME_FLAG_PURE, left, left_clone);
                     if (inner) {
                         inner->function = mul;
+                        inner->flags |= power_flags;
                         apply_type_promotion(inner);
                         me_free(right);
                         n->parameters[0] = inner;
                         n->parameters[1] = left_clone2;
                         n->function = mul;
+                        n->flags |= power_flags;
                         apply_type_promotion(n);
                         known = 0;
                     } else {

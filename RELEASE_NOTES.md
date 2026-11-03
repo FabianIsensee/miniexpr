@@ -20,6 +20,22 @@ Changes from 0.2.0 to 0.2.1
   `x & (1 == 0)` and `not a == b` computed `(not a) == b`. Comparison chains
   accept `~` operands (`0 < ~x < 5` was rejected).
 
+* `x ** 0.5` and `x ** -1` of float arrays compute as NumPy does, with `sqrt()`
+  and `1 / x` instead of `pow()` (complex `x ** 0.5` with `csqrt()`): results are
+  exact, `(-inf) ** 0.5` is NaN (was inf) and `(-0.0) ** 0.5` is -0.0 (was 0.0).
+  Integer bases keep `pow()`, as in NumPy.
+
+* Inferred dtypes of power, `square()`, `%`, `fmod()` and `remainder()` of bool
+  operands follow NumPy, which has no bool loop for them: `bool ** bool`,
+  `bool ** 2` (NumPy squares), `square(bool)` and `bool % bool` are int8, and
+  `bool ** 3` is int64. They were bool. Values are unchanged.
+
+* An integer or bool base with a float exponent of 2.0 or 3.0 computes in
+  float64, as in NumPy: `int32 ** 3.0` of 2000 is 8e9. `optimize()` rewrites
+  these powers to products, which kept the integer dtype and overflowed
+  (-589934592), also with a float64 output. Integer exponents (`x ** 2`) keep the
+  integer dtype.
+
 * Behaviour change: number literals in expressions are NumPy's weak scalars
   (NEP 50). They take the dtype of the array they meet unless their kind is
   higher, independently of the output dtype: `int32 < 2.5` compares in float64

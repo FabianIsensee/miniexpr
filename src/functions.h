@@ -103,7 +103,10 @@ enum {
      * numbers by arithmetic): a weak scalar in NumPy's sense (NEP 50), typed
      * by the operands it meets rather than by its own width. */
     ME_EXPR_FLAG_NUMBER_LITERAL = 1u << 18,
-    ME_EXPR_FLAG_FLOAT_LITERAL = 1u << 19
+    ME_EXPR_FLAG_FLOAT_LITERAL = 1u << 19,
+    /* A product optimize() made from x ** 2.0 or x ** 3.0: typed like that
+     * power, i.e. as a float function (int32 ** 3.0 is float64 in NumPy). */
+    ME_EXPR_FLAG_FLOAT_POWER = 1u << 20
 };
 
 /* Check if a pointer is a synthetic address (used internally for chunked evaluation).
@@ -161,6 +164,8 @@ const char* me_menudet_operator(const me_expr* n);
 const char* me_menudet_math_name(const me_expr* n);
 bool is_float_math_function(const void* func);
 bool is_float_result_binary_function(const void* func);
+bool is_int8_for_bool_function(const void* func);
+void rewrite_numpy_scalar_power(me_expr* n);
 size_t dtype_size(me_dtype dtype);
 bool has_complex_input_types(const me_expr* n);
 bool has_unsupported_complex_function(const me_expr* n);

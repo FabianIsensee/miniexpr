@@ -1594,9 +1594,21 @@ static me_dtype retype_value_dtype(const me_expr* n) {
         return ME_BOOL;
     }
     const me_dtype result = retype_promote_operands(n, 0, arity);
-    /* int / int is float64 (and so is bool / bool), like hypot(int, int). */
-    if (IS_FUNCTION(n->type) && arity == 2 && is_float_result_binary_function(n->function)) {
+    /* int / int is float64 (and so is bool / bool), like hypot(int, int);
+     * so is int ** 2.0, which optimize() turned into a product. */
+    if (IS_FUNCTION(n->type) && arity == 2 &&
+        (is_float_result_binary_function(n->function) || (n->flags & ME_EXPR_FLAG_FLOAT_POWER))) {
         return promote_float_math_result(result);
+    }
+    if (IS_FUNCTION(n->type) && is_int8_for_bool_function(n->function)) {
+        if (result == ME_BOOL) return ME_INT8;
+        /* NumPy computes bool_array ** 2 as np.square(), not with the int64
+         * of a weak 2 (bool ** 3 is int64). */
+        const me_expr* exponent = arity == 2 ? (const me_expr*)n->parameters[1] : NULL;
+        if (n->function == (void*)pow && arg0->dtype == ME_BOOL && retype_is_weak(exponent) &&
+            !(exponent->flags & ME_EXPR_FLAG_FLOAT_LITERAL) && exponent->value == 2.0) {
+            return ME_INT8;
+        }
     }
     return result;
 }
@@ -1697,10 +1709,11 @@ static bool retype_node(me_expr* n) {
 
 /* Types a node whose operands are typed already. */
 static bool retype_self(me_expr* n) {
-    const int arity = ARITY(n->type);
     if (n->flags & ME_EXPR_FLAG_EXPLICIT_DTYPE) {
         return true;
     }
+    rewrite_numpy_scalar_power(n);
+    const int arity = ARITY(n->type);
     if (is_comparison_node(n) && !retype_fix_out_of_range_comparison(n)) {
         return false;
     }
