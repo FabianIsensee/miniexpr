@@ -4723,6 +4723,12 @@ static me_expr* base(state* s) {
             ret->integer_magnitude = s->integer_magnitude;
             ret->literal_f32 = s->literal_f32;
         }
+        else {
+            ret->flags |= ME_EXPR_FLAG_NUMBER_LITERAL;
+            if (is_float_dtype(s->dtype) || is_complex_dtype(s->dtype)) {
+                ret->flags |= ME_EXPR_FLAG_FLOAT_LITERAL;
+            }
+        }
         // Use inferred type for constants (floating point vs integer)
         if (s->target_dtype == ME_AUTO) {
             ret->dtype = s->dtype;
@@ -9557,6 +9563,18 @@ static me_expr* clone_expr(const me_expr* src) {
     return clone;
 }
 
+/* Gives a comparison a fixed outcome while it still reads operand `keep`
+ * (an integer, so x == x always holds): the typing pass uses it for
+ * comparisons with literals outside every integer range. False on OOM. */
+bool make_fixed_comparison(me_expr* cmp, int keep, bool outcome) {
+    me_expr* copy = clone_expr((const me_expr*)cmp->parameters[keep]);
+    if (!copy) return false;
+    me_free((me_expr*)cmp->parameters[1 - keep]);
+    cmp->parameters[1 - keep] = copy;
+    cmp->function = outcome ? (void*)cmp_eq : (void*)cmp_ne;
+    return true;
+}
+
 /* Thread-safe chunked evaluation using expression cloning.
  * This function is safe to call from multiple threads simultaneously,
  * even on the same expression object. Each call creates a temporary
@@ -9736,6 +9754,22 @@ cleanup:
 }
 
 
+/* Arithmetic of number literals is a number literal again, as in Python
+ * (-1.5, 2 * 3, 1 / 2); a function of literals (sin(1.0)) is a NumPy
+ * float64 scalar in NumPy, i.e. strong. */
+static unsigned folded_literal_flags(const me_expr* n, double value) {
+    const bool arithmetic = me_arithmetic_operator(n) != NULL ||
+        (ARITY(n->type) == 2 && n->function == (void*)pow);
+    if (!arithmetic) return 0;
+    bool is_float = n->function == (void*)divide || value != floor(value);
+    for (int i = 0; i < ARITY(n->type); i++) {
+        const me_expr* arg = (const me_expr*)n->parameters[i];
+        if (!(arg->flags & ME_EXPR_FLAG_NUMBER_LITERAL)) return 0;
+        is_float |= (arg->flags & ME_EXPR_FLAG_FLOAT_LITERAL) != 0;
+    }
+    return ME_EXPR_FLAG_NUMBER_LITERAL | (is_float ? ME_EXPR_FLAG_FLOAT_LITERAL : 0);
+}
+
 void optimize(me_expr* n) {
     /* Evaluates as much as possible. */
     if (!n) return;
@@ -9754,7 +9788,8 @@ void optimize(me_expr* n) {
                 known = 0;
             }
         }
-        if (IS_FUNCTION(n->type) && arity == 2 && n->function == (void*)pow) {
+        /* A constant base is folded below instead (3**2 stays a literal). */
+        if (!known && IS_FUNCTION(n->type) && arity == 2 && n->function == (void*)pow) {
             me_expr *right = (me_expr*)n->parameters[1];
             if (right && right->type == ME_CONSTANT && right->value == 2.0) {
                 /* Fast path: rewrite x**2 (or pow(x,2)) to x*x to avoid scalar pow in eval. */
@@ -9798,10 +9833,12 @@ void optimize(me_expr* n) {
             /* Type the folded constant from its operands (-1.5 like 1.5), not
              * by the call's provisional parse-time dtype. */
             const me_dtype dtype = infer_output_type(n);
+            const unsigned literal_flags = folded_literal_flags(n, value);
             me_free_parameters(n);
             n->type = ME_CONSTANT;
             n->value = value;
             n->dtype = dtype;
+            n->flags |= literal_flags;
         }
     }
 }

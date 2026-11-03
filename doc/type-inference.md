@@ -1,14 +1,29 @@
 # Type Inference and Constants
 
-## Important: How ME_AUTO Works with Constants
+## Important: How Constants Are Typed
 
-When you use `ME_AUTO` as the output dtype in `me_compile()`, miniexpr automatically infers the result type. **For constants in expressions, the type is inferred from your variables.**
+Number literals in an expression are typed like Python numbers in NumPy
+([NEP 50](https://numpy.org/neps/nep-0050-scalar-promotion.html)): they are
+*weak* and take the dtype of the array operand they meet, unless their kind is
+higher (bool < integer < floating point < complex).
 
 ### The Rule
 
-**Constants inherit the type of the first variable when output dtype is ME_AUTO.**
+| Operand dtype | `x + 2` | `x + 2.5` | `x < 2.5` computes in |
+|---------------|---------|-----------|-----------------------|
+| `ME_BOOL`     | int64   | float64   | float64               |
+| `ME_INT8`     | int8    | float64   | float64               |
+| `ME_INT32`    | int32   | float64   | float64               |
+| `ME_UINT8`    | uint8   | float64   | float64               |
+| `ME_FLOAT32`  | float32 | float32   | float32               |
+| `ME_FLOAT64`  | float64 | float64   | float64               |
 
-This ensures type consistency and prevents unexpected type promotions.
+- An integer literal outside the range of an integer operand compares by value
+  (`int8 < 300` is true, `uint8 > -1` is true), as in NumPy 2.
+- Literals combined only with literals (`2 * 3.5`, `-1`) stay weak; a function
+  of literals (`sin(1.0)`) is a float64 value, as NumPy's `np.sin(1.0)`.
+- The output dtype does not change how literals or intermediates are typed: the
+  expression is computed as NumPy would and only the result is converted.
 
 ## Example: FLOAT32 Variables with Constants
 
@@ -30,7 +45,7 @@ if (me_compile("x + 3.0", vars, 1, ME_AUTO, &err, &expr) != ME_COMPILE_SUCCESS) 
 
 1. You specify variable `x` as `ME_FLOAT32`
 2. You use `ME_AUTO` for output
-3. miniexpr infers constant `3.0` as `FLOAT32` (matching variable type)
+3. The weak literal `3.0` adopts `FLOAT32` from `x`
 4. Result is `FLOAT32` (no unexpected promotion to FLOAT64)
 
 ## When This Matters
@@ -59,6 +74,7 @@ data = np.array([1, 2, 3], dtype=np.float32)  # float32 array
 
 # miniexpr with ME_AUTO matches this dtype
 # Constants in "data + 3.0" are treated as float32
+# ("np.arange(3, dtype=np.int32) + 0.5" is float64, and so is miniexpr's result)
 ```
 
 ### 3. **GPU/SIMD Optimization**
@@ -99,7 +115,7 @@ When variables have explicit types and you specify an output dtype, variables ke
 me_variable vars[] = {{"x", ME_FLOAT32}, {"y", ME_FLOAT32}};
 me_expr *expr = NULL;
 if (me_compile("x + 3.0", vars, 2, ME_FLOAT64, &err, &expr) != ME_COMPILE_SUCCESS) { /* handle error */ }
-// Computation: FLOAT32 + FLOAT32 → FLOAT32
+// Computation: FLOAT32 + weak 3.0 → FLOAT32
 // Output: Cast to FLOAT64
 // Result: FLOAT64 (cast from FLOAT32 computation)
 ```
@@ -134,8 +150,7 @@ me_variable vars[] = {
 };
 me_expr *expr = NULL;
 if (me_compile("count * price * 1.08", vars, 2, ME_AUTO, &err, &expr) != ME_COMPILE_SUCCESS) { /* handle error */ }
-// Constants infer from first variable (INT32)
-// But expression promotes to FLOAT64 due to mixed types
+// count * price is FLOAT64; the weak 1.08 keeps it FLOAT64
 // Result: FLOAT64 ✓
 ```
 
@@ -151,15 +166,16 @@ if (me_compile("x + 3.0", vars, 1, ME_AUTO, &err, &expr) != ME_COMPILE_SUCCESS) 
 
 ## Summary Table
 
-| Scenario | Variable Dtype | Output Dtype | Constant Type | Result Type |
-|----------|---------------|--------------|---------------|-------------|
-| Float32 + const | `ME_FLOAT32` | `ME_AUTO` | `FLOAT32` | `FLOAT32` ✓ |
-| Float64 + const | `ME_FLOAT64` | `ME_AUTO` | `FLOAT64` | `FLOAT64` ✓ |
-| Int32 + const | `ME_INT32` | `ME_AUTO` | `INT32` | `INT32` ✓ |
-| Float32 + const | `ME_FLOAT32` | `ME_FLOAT64` | `FLOAT64` | `FLOAT64` ✓ |
-| Mixed types | Both explicit | `ME_AUTO` | Matches 1st var | Promoted as needed ✓ |
+| Scenario | Variable Dtype | Output Dtype | Computed In | Result Type |
+|----------|---------------|--------------|-------------|-------------|
+| Float32 + 3.0 | `ME_FLOAT32` | `ME_AUTO` | `FLOAT32` | `FLOAT32` ✓ |
+| Float64 + 3.0 | `ME_FLOAT64` | `ME_AUTO` | `FLOAT64` | `FLOAT64` ✓ |
+| Int32 + 3 | `ME_INT32` | `ME_AUTO` | `INT32` | `INT32` ✓ |
+| Int32 + 0.5 | `ME_INT32` | `ME_AUTO` | `FLOAT64` | `FLOAT64` ✓ |
+| Float32 + 3.0 | `ME_FLOAT32` | `ME_FLOAT64` | `FLOAT32` | `FLOAT64` ✓ (cast) |
+| Mixed types | Both explicit | `ME_AUTO` | NumPy promotion | Promoted as needed ✓ |
 | All ME_AUTO | All `ME_AUTO` | `ME_FLOAT64` | `FLOAT64` | `FLOAT64` ✓ (homogeneous) |
-| Explicit vars | Both explicit | `ME_FLOAT32` | Matches vars | `FLOAT32` ✓ (cast) |
+| Explicit vars | Both explicit | `ME_FLOAT32` | NumPy promotion | `FLOAT32` ✓ (cast) |
 
 ## See Also
 

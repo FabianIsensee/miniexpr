@@ -4,6 +4,15 @@ Release notes for miniexpr
 Changes from 0.2.0 to 0.2.1
 ===========================
 
+* Behaviour change: number literals in expressions are NumPy's weak scalars
+  (NEP 50). They take the dtype of the array they meet unless their kind is
+  higher, independently of the output dtype: `int32 < 2.5` compares in float64
+  (was: with 2), `int8 < 300` is true, `float32 > 0.1` compares with
+  float32(0.1), and under `ME_AUTO` `int32 + 0.5` is float64 (was int32) and
+  `bool + 1` is int64. An integer literal outside the integer dtype it meets
+  (`uint8 + 300`, rejected by NumPy 2) widens the computation (uint16) instead
+  of wrapping.
+
 * Behaviour change: true division and `atan2`, `copysign`, `hypot`,
   `logaddexp`, `nextafter` of integer or bool operands compute in float64, as
   in NumPy (int / int was computed in integer arithmetic, and bool / bool could

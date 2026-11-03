@@ -1447,6 +1447,129 @@ static bool retype_is_zero_one_valued(const me_expr* n) {
     return is_comparison_node(n) || is_logical_node(n);
 }
 
+static bool retype_is_weak(const me_expr* n) {
+    return TYPE_MASK(n->type) == ME_CONSTANT && (n->flags & ME_EXPR_FLAG_NUMBER_LITERAL);
+}
+
+/* NumPy dtype kinds, in promotion order. */
+typedef enum {
+    RETYPE_KIND_BOOL,
+    RETYPE_KIND_INT,
+    RETYPE_KIND_FLOAT,
+    RETYPE_KIND_COMPLEX
+} retype_kind_t;
+
+static retype_kind_t retype_kind(me_dtype dtype) {
+    if (dtype == ME_BOOL) return RETYPE_KIND_BOOL;
+    if (is_integral_or_bool(dtype)) return RETYPE_KIND_INT;
+    if (dtype == ME_FLOAT32 || dtype == ME_FLOAT64) return RETYPE_KIND_FLOAT;
+    return RETYPE_KIND_COMPLEX;
+}
+
+static retype_kind_t retype_literal_kind(const me_expr* literal) {
+    return (literal->flags & ME_EXPR_FLAG_FLOAT_LITERAL) ? RETYPE_KIND_FLOAT : RETYPE_KIND_INT;
+}
+
+static bool retype_is_unsigned(me_dtype dtype) {
+    return dtype >= ME_UINT8 && dtype <= ME_UINT64;
+}
+
+static bool retype_fits_integer(double value, me_dtype dtype) {
+    switch (dtype) {
+    case ME_INT8: return value >= INT8_MIN && value <= INT8_MAX;
+    case ME_INT16: return value >= INT16_MIN && value <= INT16_MAX;
+    case ME_INT32: return value >= INT32_MIN && value <= INT32_MAX;
+    case ME_INT64: return value >= -9223372036854775808.0 && value < 9223372036854775808.0;
+    case ME_UINT8: return value >= 0 && value <= UINT8_MAX;
+    case ME_UINT16: return value >= 0 && value <= UINT16_MAX;
+    case ME_UINT32: return value >= 0 && value <= UINT32_MAX;
+    case ME_UINT64: return value >= 0 && value < 18446744073709551616.0;
+    default: return true;
+    }
+}
+
+/* The smallest integer dtype that holds an integer literal (unsigned first
+ * if preferred and the value is non-negative), or float64 if none does. */
+static me_dtype retype_literal_int_dtype(double value, bool prefer_unsigned) {
+    static const me_dtype signed_types[] = {ME_INT8, ME_INT16, ME_INT32, ME_INT64};
+    static const me_dtype unsigned_types[] = {ME_UINT8, ME_UINT16, ME_UINT32, ME_UINT64};
+    for (int i = 0; prefer_unsigned && i < 4; i++) {
+        if (retype_fits_integer(value, unsigned_types[i])) return unsigned_types[i];
+    }
+    for (int i = 0; i < 4; i++) {
+        if (retype_fits_integer(value, signed_types[i])) return signed_types[i];
+    }
+    return retype_fits_integer(value, ME_UINT64) ? ME_UINT64 : ME_FLOAT64;
+}
+
+/* Common dtype of operands [first, first + count) under NEP 50: number
+ * literals are weak, so they take the dtype of the arrays they meet
+ * (float32 + 0.1 is float32, int8 + 1 is int8) unless their kind is higher
+ * (int8 + 1.5 is float64, bool + 1 is int64).  Literals alone are Python
+ * scalars: int64 or float64.  NumPy 2 rejects an integer literal that the
+ * integer dtype cannot hold (uint8 + 300); miniexpr cannot raise while
+ * evaluating, so it computes in a dtype that holds both (uint16 here, as
+ * NumPy 1 did) instead of wrapping the literal. */
+static me_dtype retype_promote_operands(const me_expr* n, int first, int count) {
+    bool any_strong = false;
+    me_dtype strong = ME_BOOL;
+    int weak_kind = -1;
+    for (int i = first; i < first + count; i++) {
+        const me_expr* arg = (const me_expr*)n->parameters[i];
+        if (retype_is_weak(arg)) {
+            const int kind = (int)retype_literal_kind(arg);
+            if (kind > weak_kind) weak_kind = kind;
+        }
+        else {
+            strong = any_strong ? promote_types(strong, arg->dtype) : arg->dtype;
+            any_strong = true;
+        }
+    }
+    if (!any_strong) {
+        return weak_kind == RETYPE_KIND_FLOAT ? ME_FLOAT64 : ME_INT64;
+    }
+    if (weak_kind > (int)retype_kind(strong)) {
+        strong = promote_types(strong, weak_kind == RETYPE_KIND_FLOAT ? ME_FLOAT64 : ME_INT64);
+    }
+    for (int i = first; i < first + count && retype_kind(strong) == RETYPE_KIND_INT; i++) {
+        const me_expr* arg = (const me_expr*)n->parameters[i];
+        if (retype_is_weak(arg) && retype_literal_kind(arg) == RETYPE_KIND_INT &&
+            !retype_fits_integer(arg->value, strong)) {
+            strong = promote_types(strong, retype_literal_int_dtype(arg->value, retype_is_unsigned(strong)));
+        }
+    }
+    return strong;
+}
+
+/* A comparison of an integer operand with an integer literal that no integer
+ * dtype holds together with it (int64 < 2**63, uint64 > -1) has the same
+ * outcome for every element; float64 would round the operand at the edge.
+ * It is rewritten to x == x or x != x, which keeps the operand bound.
+ * Returns false on OOM. */
+static bool retype_fix_out_of_range_comparison(me_expr* n) {
+    for (int lit = 0; lit < 2; lit++) {
+        const me_expr* literal = (const me_expr*)n->parameters[lit];
+        const me_expr* other = (const me_expr*)n->parameters[1 - lit];
+        if (!retype_is_weak(literal) || retype_literal_kind(literal) != RETYPE_KIND_INT ||
+            retype_is_weak(other) || retype_kind(other->dtype) != RETYPE_KIND_INT ||
+            other->dtype == ME_BOOL || retype_promote_operands(n, 0, 2) != ME_FLOAT64) {
+            continue;
+        }
+        const char *op = me_comparison_operator(n);
+        if (!op) return true;
+        /* With the literal on the right, x < L holds when L is above the range. */
+        const bool above = literal->value > 0;
+        const bool literal_right = lit == 1;
+        bool outcome;
+        if (!strcmp(op, "==")) outcome = false;
+        else if (!strcmp(op, "!=")) outcome = true;
+        else if (op[0] == '<') outcome = above == literal_right;
+        else outcome = above != literal_right;
+        return make_fixed_comparison(n, 1 - lit, outcome);
+    }
+    return true;
+}
+
 /* NumPy result dtype of a node whose operands are already typed. */
 static me_dtype retype_value_dtype(const me_expr* n) {
     const int arity = ARITY(n->type);
@@ -1459,19 +1582,18 @@ static me_dtype retype_value_dtype(const me_expr* n) {
         return ME_BOOL;
     }
     if (IS_FUNCTION(n->type) && arity == 3 && n->function == (void*)where_scalar) {
-        return promote_types(((const me_expr*)n->parameters[1])->dtype,
-                             ((const me_expr*)n->parameters[2])->dtype);
+        return retype_promote_operands(n, 1, 2);
     }
     if (retype_is_complex_to_real(n)) {
         return arg0->dtype == ME_COMPLEX64 ? ME_FLOAT32 : ME_FLOAT64;
     }
     if (IS_FUNCTION(n->type) && arity == 1 && (n->flags & ME_EXPR_FLAG_FLOAT_MATH)) {
-        return promote_float_math_result(arg0->dtype);
+        return promote_float_math_result(retype_promote_operands(n, 0, 1));
     }
-    me_dtype result = ME_BOOL;
-    for (int i = 0; i < arity; i++) {
-        result = promote_types(result, ((const me_expr*)n->parameters[i])->dtype);
+    if (arity == 0) {
+        return ME_BOOL;
     }
+    const me_dtype result = retype_promote_operands(n, 0, arity);
     /* int / int is float64 (and so is bool / bool), like hypot(int, int). */
     if (IS_FUNCTION(n->type) && arity == 2 && is_float_result_binary_function(n->function)) {
         return promote_float_math_result(result);
@@ -1490,11 +1612,7 @@ static me_dtype retype_compute_dtype(const me_expr* n) {
         return ((const me_expr*)n->parameters[0])->dtype;
     }
     if (retype_is_zero_one_valued(n)) {
-        me_dtype result = ME_BOOL;
-        for (int i = 0; i < ARITY(n->type); i++) {
-            result = promote_types(result, ((const me_expr*)n->parameters[i])->dtype);
-        }
-        return result;
+        return retype_promote_operands(n, 0, ARITY(n->type));
     }
     return n->dtype;
 }
@@ -1582,6 +1700,9 @@ static bool retype_self(me_expr* n) {
     const int arity = ARITY(n->type);
     if (n->flags & ME_EXPR_FLAG_EXPLICIT_DTYPE) {
         return true;
+    }
+    if (is_comparison_node(n) && !retype_fix_out_of_range_comparison(n)) {
+        return false;
     }
     n->dtype = retype_value_dtype(n);
     /* A reduction evaluates its argument on its own (eval_reduction()). */
