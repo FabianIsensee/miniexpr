@@ -638,6 +638,15 @@ bool is_float_result_binary_function(const void* func) {
         func == (void*)nextafter;
 }
 
+/* The `%` operator's function: fmod here, NumPy's remainder where `%` and
+ * remainder() share it. Compared with the registered address too, as CRT
+ * aliases may differ (see me_menudet_operator()). */
+bool is_modulo_function(const void* func) {
+    if (func == (void*)fmod) return true;
+    const me_variable* builtin = find_builtin("remainder", 9);
+    return builtin && func == builtin->address;
+}
+
 static float reduce_min_float32_nan_safe(const float* data, int nitems) {
     if (nitems <= 0) return INFINITY;
 #if defined(__AVX__) || defined(__AVX2__)
@@ -4272,6 +4281,24 @@ static void read_number_token(state* s) {
         return;
     }
 
+    /* A decimal integer with more digits than a double holds may not survive
+     * strtod(): compare its digits with the exact decimal value of the double. */
+    s->literal_inexact = false;
+    if (!is_float) {
+        const char* digits = start;
+        while (digits < s->next - 1 && *digits == '0') digits++;
+        const ptrdiff_t ndigits = s->next - digits;
+        bool decimal = ndigits > 15;
+        for (const char* p = digits; p < s->next && decimal; p++) {
+            decimal = *p >= '0' && *p <= '9';
+        }
+        if (decimal) {
+            char exact[400];
+            const int len = snprintf(exact, sizeof(exact), "%.0f", s->value);
+            s->literal_inexact = len != ndigits || memcmp(exact, digits, (size_t)len) != 0;
+        }
+    }
+
     if (is_float) {
         // Match NumPy conventions: float constants match target_dtype when it's a float type
         // This ensures FLOAT32 arrays + float constants -> FLOAT32 (NumPy behavior)
@@ -4729,6 +4756,15 @@ static me_expr* base(state* s) {
             if (s->dtype == ME_INT64) ret->flags |= ME_EXPR_FLAG_INTEGER_LITERAL;
             ret->integer_magnitude = s->integer_magnitude;
             ret->literal_f32 = s->literal_f32;
+        }
+        else {
+            ret->flags |= ME_EXPR_FLAG_NUMBER_LITERAL;
+            if (is_float_dtype(s->dtype) || is_complex_dtype(s->dtype)) {
+                ret->flags |= ME_EXPR_FLAG_FLOAT_LITERAL;
+            }
+            if (s->literal_inexact) {
+                ret->flags |= ME_EXPR_FLAG_INEXACT_LITERAL;
+            }
         }
         // Use inferred type for constants (floating point vs integer)
         if (s->target_dtype == ME_AUTO) {
@@ -9580,6 +9616,18 @@ static me_expr* clone_expr(const me_expr* src) {
     return clone;
 }
 
+/* Gives a comparison a fixed outcome while it still reads operand `keep`
+ * (an integer, so x == x always holds): the typing pass uses it for
+ * comparisons with literals outside every integer range. False on OOM. */
+bool make_fixed_comparison(me_expr* cmp, int keep, bool outcome) {
+    me_expr* copy = clone_expr((const me_expr*)cmp->parameters[keep]);
+    if (!copy) return false;
+    me_free((me_expr*)cmp->parameters[1 - keep]);
+    cmp->parameters[1 - keep] = copy;
+    cmp->function = outcome ? (void*)cmp_eq : (void*)cmp_ne;
+    return true;
+}
+
 /* Thread-safe chunked evaluation using expression cloning.
  * This function is safe to call from multiple threads simultaneously,
  * even on the same expression object. Each call creates a temporary
@@ -9759,6 +9807,33 @@ cleanup:
 }
 
 
+/* Arithmetic and bitwise operators of number literals give a number
+ * literal again, as in Python (-1.5, 2 * 3, 1 / 2, 1 << 2); a function of
+ * literals (sin(1.0)) is a NumPy float64 scalar in NumPy, i.e. strong. */
+static unsigned folded_literal_flags(const me_expr* n, double value) {
+    const bool arithmetic = me_arithmetic_operator(n) != NULL ||
+        (ARITY(n->type) == 2 && n->function == (void*)pow);
+    const bool bitwise = n->function == (void*)bit_and || n->function == (void*)bit_or ||
+        n->function == (void*)bit_xor || n->function == (void*)bit_not ||
+        n->function == (void*)bit_shl || n->function == (void*)bit_shr ||
+        (ARITY(n->type) == 2 && is_modulo_function(n->function));
+    if (!arithmetic && !bitwise) return 0;
+    /* A negative power of an integer is a float in Python (1 ** -1 is 1.0). */
+    bool is_float = n->function == (void*)divide || value != floor(value) ||
+        (n->function == (void*)pow && ((const me_expr*)n->parameters[1])->value < 0);
+    unsigned inexact = 0;
+    for (int i = 0; i < ARITY(n->type); i++) {
+        const me_expr* arg = (const me_expr*)n->parameters[i];
+        /* A folded comparison of literals is a Python bool, whose arithmetic
+         * gives a Python int (-(1 < 2) is -1, (1 < 2) + (2 < 3) is 2). */
+        if (arithmetic && arg->dtype == ME_BOOL && !(arg->flags & ME_EXPR_FLAG_NUMBER_LITERAL)) continue;
+        if (!(arg->flags & ME_EXPR_FLAG_NUMBER_LITERAL)) return 0;
+        is_float |= (arg->flags & ME_EXPR_FLAG_FLOAT_LITERAL) != 0;
+        inexact |= arg->flags & ME_EXPR_FLAG_INEXACT_LITERAL;
+    }
+    return ME_EXPR_FLAG_NUMBER_LITERAL | (is_float ? ME_EXPR_FLAG_FLOAT_LITERAL : 0) | inexact;
+}
+
 void optimize(me_expr* n) {
     /* Evaluates as much as possible. */
     if (!n) return;
@@ -9777,7 +9852,8 @@ void optimize(me_expr* n) {
                 known = 0;
             }
         }
-        if (IS_FUNCTION(n->type) && arity == 2 && n->function == (void*)pow) {
+        /* A constant base is folded below instead (3**2 stays a literal). */
+        if (!known && IS_FUNCTION(n->type) && arity == 2 && n->function == (void*)pow) {
             me_expr *right = (me_expr*)n->parameters[1];
             if (right && right->type == ME_CONSTANT && right->value == 2.0) {
                 /* Fast path: rewrite x**2 (or pow(x,2)) to x*x to avoid scalar pow in eval. */
@@ -9834,19 +9910,54 @@ void optimize(me_expr* n) {
         }
         if (known) {
             const double value = me_eval_scalar(n);
-            /* Type the folded constant from its operands (-1.5 like 1.5), not
-             * by the call's provisional parse-time dtype; true division and
-             * the float functions of integer constants are float64 (5 / 2). */
-            me_dtype dtype = infer_output_type(n);
-            if (IS_FUNCTION(n->type) && ARITY(n->type) == 2 &&
-                (is_float_result_binary_function(n->function) || is_ldexp_function(n->function)) &&
-                !is_float_dtype(dtype) && !is_complex_dtype(dtype)) {
+            unsigned literal_flags = folded_literal_flags(n, value);
+            me_dtype dtype;
+            if (n->flags & ME_EXPR_FLAG_USER_FUNCTION) {
+                /* A caller's function keeps its registered or parse-time dtype. */
+                dtype = n->dtype;
+            }
+            else if (arity == 0) {
+                /* pi and e are Python floats in NumPy expressions: weak. */
                 dtype = ME_FLOAT64;
+                literal_flags = ME_EXPR_FLAG_NUMBER_LITERAL | ME_EXPR_FLAG_FLOAT_LITERAL;
+            }
+            else {
+                /* A function of literals is a strong NumPy scalar computed on
+                 * the literals' default dtypes (np.abs(-2) is int64, np.log(3)
+                 * is float64), not on the provisional dtype a literal took from
+                 * the first variable or the output. */
+                if (!literal_flags) {
+                    for (i = 0; i < arity; ++i) {
+                        me_expr* arg = (me_expr*)n->parameters[i];
+                        if ((arg->flags & ME_EXPR_FLAG_NUMBER_LITERAL) && !is_complex_dtype(arg->dtype)) {
+                            arg->dtype = (arg->flags & ME_EXPR_FLAG_FLOAT_LITERAL) ? ME_FLOAT64 : ME_INT64;
+                        }
+                    }
+                }
+                /* infer_output_type() takes a bool n->dtype for a comparison;
+                 * another operator of literals typed by a bool output (7 % 5)
+                 * is typed from its operands. */
+                if (n->dtype == ME_BOOL && !is_comparison_node(n) && !is_logical_node(n)) {
+                    n->dtype = ME_AUTO;
+                }
+                /* Type the folded constant from its operands (-1.5 like 1.5),
+                 * not by the call's provisional parse-time dtype; true division
+                 * and the float functions of integer constants are float64. */
+                dtype = infer_output_type(n);
+                if (IS_FUNCTION(n->type) && ARITY(n->type) == 2 &&
+                    (is_float_result_binary_function(n->function) || is_ldexp_function(n->function)) &&
+                    !is_float_dtype(dtype) && !is_complex_dtype(dtype)) {
+                    dtype = ME_FLOAT64;
+                }
             }
             me_free_parameters(n);
             n->type = ME_CONSTANT;
-            n->value = value;
+            /* An integer zero has no sign (8 % -4 and -0 are 0, not -0.0). */
+            const bool integer_result = (literal_flags & ME_EXPR_FLAG_NUMBER_LITERAL) ?
+                !(literal_flags & ME_EXPR_FLAG_FLOAT_LITERAL) : (is_integer_dtype(dtype) || dtype == ME_BOOL);
+            n->value = integer_result && value == 0 ? 0.0 : value;
             n->dtype = dtype;
+            n->flags |= literal_flags;
         }
     }
 }

@@ -45,6 +45,8 @@ typedef struct state {
     me_dsl_semantic_profile semantic_profile;
     uint64_t integer_magnitude;
     float literal_f32;
+    /* The last number token was an integer that strtod() rounded. */
+    bool literal_inexact;
 } state;
 
 /* Internal definition of me_expr (opaque to users). */
@@ -101,9 +103,17 @@ enum {
     /* Uniform external inputs have scalar storage; locals remain per-lane. */
     ME_EXPR_FLAG_UNIFORM_INPUT = 1u << 16,
     ME_EXPR_FLAG_INTEGER_POWERS = 1u << 17,
+    /* A number written in a full-evaluator expression (or folded from such
+     * numbers by arithmetic): a weak scalar in NumPy's sense (NEP 50), typed
+     * by the operands it meets rather than by its own width. */
+    ME_EXPR_FLAG_NUMBER_LITERAL = 1u << 18,
+    ME_EXPR_FLAG_FLOAT_LITERAL = 1u << 19,
     /* Arithmetic in a full-DSL kernel, where bools are Python numbers
      * (True + True == 2); set before the typing pass. */
     ME_EXPR_FLAG_NUMERIC_BOOLS = 1u << 21,
+    /* An integer literal (or literal arithmetic) that a double does not hold
+     * exactly, e.g. 9223372036854775807, which reads as 2**63. */
+    ME_EXPR_FLAG_INEXACT_LITERAL = 1u << 22,
     /* A function bound by the caller's variables, not a builtin: it keeps
      * the dtype it was registered with, or for ME_AUTO its parse-time one. */
     ME_EXPR_FLAG_USER_FUNCTION = 1u << 23
@@ -150,6 +160,7 @@ void me_free_parameters(me_expr* n);
 
 bool is_reduction_node(const me_expr* n);
 bool is_comparison_node(const me_expr* n);
+bool make_fixed_comparison(me_expr* cmp, int keep, bool outcome);
 bool is_logical_node(const me_expr* n);
 me_expr* new_nonzero_test(me_expr* x);
 /* Internal conversion marker created by apply_type_promotion(): arity 1, no function. */
@@ -161,6 +172,8 @@ const char* me_menudet_operator(const me_expr* n);
 const char* me_menudet_math_name(const me_expr* n);
 bool is_float_math_function(const void* func);
 bool is_float_result_binary_function(const void* func);
+/* The `%` operator's function (fmod, or NumPy's remainder). */
+bool is_modulo_function(const void* func);
 bool is_ldexp_function(const void* func);
 size_t dtype_size(me_dtype dtype);
 bool has_complex_input_types(const me_expr* n);
