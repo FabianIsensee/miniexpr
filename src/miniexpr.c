@@ -1709,10 +1709,11 @@ static bool retype_node(me_expr* n) {
 
 /* Types a node whose operands are typed already. */
 static bool retype_self(me_expr* n) {
-    const int arity = ARITY(n->type);
     if (n->flags & ME_EXPR_FLAG_EXPLICIT_DTYPE) {
         return true;
     }
+    rewrite_numpy_scalar_power(n);
+    const int arity = ARITY(n->type);
     if (is_comparison_node(n) && !retype_fix_out_of_range_comparison(n)) {
         return false;
     }

@@ -642,6 +642,32 @@ bool is_int8_for_bool_function(const void* func) {
         func == (void*)remainder;
 }
 
+/* NumPy computes float_array ** 0.5 as np.sqrt() and float_array ** -1 as
+ * np.reciprocal() (and complex_array ** 0.5 as np.sqrt()): exact, and
+ * (-inf) ** 0.5 is NaN and (-0.0) ** 0.5 is -0.0, where pow() gives inf and
+ * 0.0.  Integer bases keep pow(), as in NumPy.  Rewrites a typed pow node. */
+void rewrite_numpy_scalar_power(me_expr* n) {
+    if (!IS_FUNCTION(n->type) || ARITY(n->type) != 2 || n->function != (void*)pow) return;
+    me_expr* base = (me_expr*)n->parameters[0];
+    me_expr* exponent = (me_expr*)n->parameters[1];
+    if (TYPE_MASK(exponent->type) != ME_CONSTANT) return;
+    const bool real = base->dtype == ME_FLOAT32 || base->dtype == ME_FLOAT64;
+    const bool complex_base = base->dtype == ME_COMPLEX64 || base->dtype == ME_COMPLEX128;
+    if (exponent->value == 0.5 && (real || complex_base)) {
+        me_free(exponent);
+        n->parameters[1] = NULL;
+        n->type = ME_FUNCTION1 | ME_FLAG_PURE;
+        n->function = (void*)sqrt;
+        n->flags |= ME_EXPR_FLAG_FLOAT_MATH;
+    }
+    else if (exponent->value == -1.0 && real) {
+        exponent->value = 1.0;
+        n->parameters[0] = exponent;
+        n->parameters[1] = base;
+        n->function = (void*)divide;
+    }
+}
+
 static float reduce_min_float32_nan_safe(const float* data, int nitems) {
     if (nitems <= 0) return INFINITY;
 #if defined(__AVX__) || defined(__AVX2__)
