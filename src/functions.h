@@ -40,6 +40,8 @@ typedef struct state {
 
     const me_variable* lookup;
     int lookup_len;
+    /* The last function token was bound by the caller's variables. */
+    bool user_function;
     me_dsl_semantic_profile semantic_profile;
     uint64_t integer_magnitude;
     float literal_f32;
@@ -98,7 +100,13 @@ enum {
     ME_EXPR_FLAG_WEAK_SCALAR = 1u << 15,
     /* Uniform external inputs have scalar storage; locals remain per-lane. */
     ME_EXPR_FLAG_UNIFORM_INPUT = 1u << 16,
-    ME_EXPR_FLAG_INTEGER_POWERS = 1u << 17
+    ME_EXPR_FLAG_INTEGER_POWERS = 1u << 17,
+    /* Arithmetic in a full-DSL kernel, where bools are Python numbers
+     * (True + True == 2); set before the typing pass. */
+    ME_EXPR_FLAG_NUMERIC_BOOLS = 1u << 21,
+    /* A function bound by the caller's variables, not a builtin: it keeps
+     * the dtype it was registered with, or for ME_AUTO its parse-time one. */
+    ME_EXPR_FLAG_USER_FUNCTION = 1u << 23
 };
 
 /* Check if a pointer is a synthetic address (used internally for chunked evaluation).
@@ -142,6 +150,10 @@ void me_free_parameters(me_expr* n);
 
 bool is_reduction_node(const me_expr* n);
 bool is_comparison_node(const me_expr* n);
+bool is_logical_node(const me_expr* n);
+me_expr* new_nonzero_test(me_expr* x);
+/* Internal conversion marker created by apply_type_promotion(): arity 1, no function. */
+bool is_conversion_node(const me_expr* n);
 const char* me_comparison_operator(const me_expr* n);
 /* Internal operator spelling for typed DSL arithmetic lowering, NULL otherwise. */
 const char* me_arithmetic_operator(const me_expr* n);

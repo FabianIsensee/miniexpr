@@ -1091,7 +1091,9 @@ me_dtype infer_result_type(const me_expr* n) {
             if (n->flags & ME_EXPR_FLAG_DSL_BOOL_NUMERIC_ARITH) {
                 return ME_INT64;
             }
-            if ((n->flags & ME_EXPR_FLAG_EXPLICIT_DTYPE) != 0) {
+            /* A conversion node is a type boundary: its subtree is computed
+             * separately and the result is converted to the node's dtype. */
+            if ((n->flags & ME_EXPR_FLAG_EXPLICIT_DTYPE) != 0 || is_conversion_node(n)) {
                 return n->dtype;
             }
             if (is_reduction_node(n)) {
@@ -1193,7 +1195,7 @@ me_dtype infer_output_type(const me_expr* n) {
     case ME_CLOSURE6:
     case ME_CLOSURE7:
         {
-            if ((n->flags & ME_EXPR_FLAG_EXPLICIT_DTYPE) != 0) {
+            if ((n->flags & ME_EXPR_FLAG_EXPLICIT_DTYPE) != 0 || is_conversion_node(n)) {
                 return n->dtype;
             }
             if (is_reduction_node(n)) {
@@ -1391,6 +1393,228 @@ static int check_mixed_type_nested(const me_expr* node, me_dtype parent_dtype) {
     return 0;
 }
 
+/* Typing pass for the expression evaluator.
+ *
+ * The parser types nodes while it builds them, before the dtypes of calls are
+ * known (a call starts as float64, abs(int64) is int64), and
+ * apply_type_promotion() inserts conversion nodes from those provisional
+ * dtypes; optimize() rewrites (x**2 -> x*x) re-run it on nodes that already
+ * hold conversions.  The evaluator computes every subtree up to a conversion
+ * node in one dtype and sizes its buffers by it, so a conversion built from a
+ * stale dtype converts a value of one type into a buffer of another (wrong
+ * values, heap overflows).
+ *
+ * retype_expression() runs after optimize(): it drops the parse-time
+ * conversions, recomputes every node's dtype from its operands and rebuilds
+ * the conversions, so that every operand of a node is a constant, or is
+ * computed in that node's computation dtype, or is a conversion node to it. */
+
+static bool retype_is_string_valued(const me_expr* n) {
+    return TYPE_MASK(n->type) == ME_STRING_CONSTANT || is_string_dtype(n->dtype) ||
+           is_string_producing_node(n);
+}
+
+/* A string operation (a string value, or a predicate or comparison of
+ * strings) keeps its parse-time typing; the numeric parts around it are
+ * typed as usual. */
+static bool retype_is_string_operation(const me_expr* n) {
+    if (retype_is_string_valued(n)) return true;
+    if (!(IS_FUNCTION(n->type) || IS_CLOSURE(n->type))) return false;
+    for (int i = 0; i < ARITY(n->type); i++) {
+        if (retype_is_string_valued((const me_expr*)n->parameters[i])) return true;
+    }
+    return false;
+}
+
+static bool retype_is_complex(me_dtype dtype) {
+    return dtype == ME_COMPLEX64 || dtype == ME_COMPLEX128;
+}
+
+/* abs(), real() and imag() of a complex operand are evaluated by
+ * private_eval() itself, so they must sit behind a conversion boundary. */
+static bool retype_is_complex_to_real(const me_expr* n) {
+    if (!IS_FUNCTION(n->type) || ARITY(n->type) != 1) return false;
+    if (n->function != (void*)fabs && n->function != (void*)imag_wrapper &&
+        n->function != (void*)real_wrapper) {
+        return false;
+    }
+    return retype_is_complex(((const me_expr*)n->parameters[0])->dtype);
+}
+
+/* Comparisons and logical operators yield bool, computed in their operands'
+ * dtype as 0/1. */
+static bool retype_is_zero_one_valued(const me_expr* n) {
+    return is_comparison_node(n) || is_logical_node(n);
+}
+
+/* NumPy result dtype of a node whose operands are already typed. */
+static me_dtype retype_value_dtype(const me_expr* n) {
+    const int arity = ARITY(n->type);
+    const me_expr* arg0 = arity > 0 ? (const me_expr*)n->parameters[0] : NULL;
+
+    /* A caller's function returns the dtype it was registered with; for
+     * ME_AUTO that is its parse-time dtype, as before the typing pass. */
+    if (n->flags & ME_EXPR_FLAG_USER_FUNCTION) {
+        return n->dtype;
+    }
+    if (is_reduction_node(n)) {
+        return reduction_output_dtype(arg0->dtype, n->function);
+    }
+    if (retype_is_zero_one_valued(n)) {
+        return ME_BOOL;
+    }
+    if (IS_FUNCTION(n->type) && arity == 3 && n->function == (void*)where_scalar) {
+        return promote_types(((const me_expr*)n->parameters[1])->dtype,
+                             ((const me_expr*)n->parameters[2])->dtype);
+    }
+    if (retype_is_complex_to_real(n)) {
+        return arg0->dtype == ME_COMPLEX64 ? ME_FLOAT32 : ME_FLOAT64;
+    }
+    if (IS_FUNCTION(n->type) && arity == 1 && (n->flags & ME_EXPR_FLAG_FLOAT_MATH)) {
+        return promote_float_math_result(arg0->dtype);
+    }
+    me_dtype result = ME_BOOL;
+    for (int i = 0; i < arity; i++) {
+        result = promote_types(result, ((const me_expr*)n->parameters[i])->dtype);
+    }
+    /* Arithmetic of bools must not compute in bool (True + True would store
+     * 2 in a bool): DSL kernels follow Python (int64, True + True == 2),
+     * expressions keep int8 as before. */
+    if (result == ME_BOOL && me_arithmetic_operator(n)) {
+        return (n->flags & ME_EXPR_FLAG_NUMERIC_BOOLS) ? ME_INT64 : ME_INT8;
+    }
+    return result;
+}
+
+/* The dtype a typed node is evaluated in: its result dtype, except for nodes
+ * that compute in their operands' dtype and yield 0/1 (comparisons, logical
+ * operators), and the boundaries above. */
+static me_dtype retype_compute_dtype(const me_expr* n) {
+    if (TYPE_MASK(n->type) == ME_CONSTANT || TYPE_MASK(n->type) == ME_VARIABLE) {
+        return n->dtype;
+    }
+    if (retype_is_complex_to_real(n)) {
+        return ((const me_expr*)n->parameters[0])->dtype;
+    }
+    if (retype_is_zero_one_valued(n)) {
+        me_dtype result = ME_BOOL;
+        for (int i = 0; i < ARITY(n->type); i++) {
+            result = promote_types(result, ((const me_expr*)n->parameters[i])->dtype);
+        }
+        return result;
+    }
+    return n->dtype;
+}
+
+static me_expr* retype_unwrap_conversions(me_expr* n) {
+    while (is_conversion_node(n) && (n->flags & ME_EXPR_FLAG_EXPLICIT_DTYPE) == 0) {
+        me_expr* child = (me_expr*)n->parameters[0];
+        n->parameters[0] = NULL;
+        me_free(n);
+        n = child;
+    }
+    return n;
+}
+
+/* Makes operand `i` of `n` evaluable in `target`. Returns false on OOM. */
+static bool retype_fit_operand(me_expr* n, int i, me_dtype target) {
+    me_expr* child = (me_expr*)n->parameters[i];
+    if (TYPE_MASK(child->type) == ME_CONSTANT) {
+        child->dtype = target;
+        return true;
+    }
+    bool needs_conversion;
+    if (retype_is_string_operation(child)) {
+        return true;
+    }
+    if (TYPE_MASK(child->type) == ME_VARIABLE) {
+        needs_conversion = child->dtype != target;
+    }
+    else {
+        needs_conversion = retype_compute_dtype(child) != target ||
+                           (child->dtype != target && !retype_is_zero_one_valued(child));
+    }
+    if (!needs_conversion) return true;
+    me_expr* conv = create_conversion_node(child, target);
+    if (!conv) return false;
+    n->parameters[i] = conv;
+    return true;
+}
+
+static bool retype_self(me_expr* n);
+
+/* Whether converting `from` to `to` keeps every value's truth (nonzero
+ * stays nonzero): to a float from an integer or a narrower float. */
+static bool retype_keeps_truth(me_dtype from, me_dtype to) {
+    if (from == to) return true;
+    if (to == ME_FLOAT64) return from != ME_COMPLEX64 && from != ME_COMPLEX128;
+    return to == ME_FLOAT32 && is_integral_or_bool(from);
+}
+
+/* where() selects by the truth of its condition. A condition that its
+ * conversion to the result dtype could zero (where(0.5, 1, 0) with an int
+ * result) is tested against zero first, as NumPy does. A constant becomes
+ * 0/1: its parse-time dtype says nothing (a bool output typed 0.5 as bool). */
+static bool retype_where_condition(me_expr* n) {
+    me_expr* cond = (me_expr*)n->parameters[0];
+    if (TYPE_MASK(cond->type) == ME_CONSTANT) {
+        cond->value = cond->value != 0.0 ? 1.0 : 0.0;
+        cond->dtype = ME_BOOL;
+        return true;
+    }
+    if (cond->dtype == ME_BOOL || retype_keeps_truth(cond->dtype, retype_value_dtype(n))) return true;
+    me_expr* test = new_nonzero_test(cond);
+    if (!test) return false;
+    n->parameters[0] = test;
+    return retype_self(test);
+}
+
+static bool retype_node(me_expr* n) {
+    if (!n || !(IS_FUNCTION(n->type) || IS_CLOSURE(n->type))) return true;
+    if (retype_is_string_operation(n)) return true;
+    const int arity = ARITY(n->type);
+    for (int i = 0; i < arity; i++) {
+        n->parameters[i] = retype_unwrap_conversions((me_expr*)n->parameters[i]);
+        if (!retype_node((me_expr*)n->parameters[i])) return false;
+    }
+    if (IS_FUNCTION(n->type) && arity == 3 && n->function == (void*)where_scalar &&
+        !retype_where_condition(n)) {
+        return false;
+    }
+    return retype_self(n);
+}
+
+/* Types a node whose operands are typed already. */
+static bool retype_self(me_expr* n) {
+    const int arity = ARITY(n->type);
+    if (n->flags & ME_EXPR_FLAG_EXPLICIT_DTYPE) {
+        return true;
+    }
+    n->dtype = retype_value_dtype(n);
+    /* A reduction evaluates its argument on its own (eval_reduction()). */
+    if (is_reduction_node(n)) {
+        return true;
+    }
+    const me_dtype target = retype_compute_dtype(n);
+    for (int i = 0; i < arity; i++) {
+        if (!retype_fit_operand(n, i, target)) return false;
+    }
+    return true;
+}
+
+static void retype_mark_numeric_bools(me_expr* n) {
+    if (!n || !(IS_FUNCTION(n->type) || IS_CLOSURE(n->type))) return;
+    for (int i = 0; i < ARITY(n->type); i++) {
+        retype_mark_numeric_bools((me_expr*)n->parameters[i]);
+    }
+    if (me_arithmetic_operator(n)) n->flags |= ME_EXPR_FLAG_NUMERIC_BOOLS;
+}
+
+/* Returns false on OOM. */
+static bool retype_expression(me_expr* root) {
+    return retype_node(root);
+}
+
 me_expr* new_expr(const int type, const me_expr* parameters[]) {
     const int arity = ARITY(type);
     const int psize = sizeof(void*) * arity;
@@ -1486,15 +1710,28 @@ void me_free(me_expr* n) {
     free(n);
 }
 
+static int private_compile_typed(const char* expression, const me_variable* variables, int var_count,
+                                 void* output, int nitems, me_dtype dtype, me_dsl_semantic_profile profile,
+                                 bool numeric_bools, int* error, me_expr** out);
+
+/* Plain expressions are NumPy array expressions. */
 int private_compile_ex(const char* expression, const me_variable* variables, int var_count,
                                void* output, int nitems, me_dtype dtype, int* error, me_expr** out) {
-    return private_compile_profile_ex(expression, variables, var_count, output, nitems,
-                                      dtype, ME_DSL_PROFILE_FULL, error, out);
+    return private_compile_typed(expression, variables, var_count, output, nitems,
+                                 dtype, ME_DSL_PROFILE_FULL, false, error, out);
 }
 
+/* DSL kernel expressions, where bools are Python numbers. */
 int private_compile_profile_ex(const char* expression, const me_variable* variables, int var_count,
                               void* output, int nitems, me_dtype dtype,
                               me_dsl_semantic_profile profile, int* error, me_expr** out) {
+    return private_compile_typed(expression, variables, var_count, output, nitems,
+                                 dtype, profile, true, error, out);
+}
+
+static int private_compile_typed(const char* expression, const me_variable* variables, int var_count,
+                                 void* output, int nitems, me_dtype dtype, me_dsl_semantic_profile profile,
+                                 bool numeric_bools, int* error, me_expr** out) {
     if (out) *out = NULL;
     if (!expression || !out || var_count < 0) {
         if (error) *error = -1;
@@ -1608,6 +1845,7 @@ int private_compile_profile_ex(const char* expression, const me_variable* variab
     s.itemsize = 0;
     s.str_data = NULL;
     s.str_len = 0;
+    s.user_function = false;
     // When dtype is ME_AUTO, infer target dtype from variables to avoid type mismatch
     if (dtype != ME_AUTO) {
         s.target_dtype = dtype;
@@ -1713,6 +1951,16 @@ int private_compile_profile_ex(const char* expression, const me_variable* variab
     }
     else {
         optimize(root);
+        if (numeric_bools) retype_mark_numeric_bools(root);
+        if (!retype_expression(root)) {
+            me_free(root);
+            if (error) *error = -1;
+            if (vars_copy) free(vars_copy);
+            if (s.str_data) {
+                free((void*)s.str_data);
+            }
+            return ME_COMPILE_ERR_OOM;
+        }
         root->output = output;
         root->nitems = nitems;
 
