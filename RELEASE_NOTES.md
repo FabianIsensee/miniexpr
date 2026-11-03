@@ -43,6 +43,15 @@ Changes from 0.2.0 to 0.2.1
   (wrong results and heap overflows such as int16 `(i + i) * abs(i)`), and a
   non-bool `where()` condition selects by its truth.
 
+* Behavior change: the `%` operator and `remainder()` now follow NumPy
+  (`np.remainder`, floor modulo) in expressions and full-profile DSL kernels,
+  for every engine: the result takes the sign of the divisor
+  (`-7 % 3 == 2`, `7 % -3 == -2`, `-7.0 % 3.0 == 2.0`). Previously `%` was C
+  `fmod` and `remainder()` was C99 `remainder()`. Integer operands are computed
+  exactly in their own width; `x % 0` is 0 and `MIN % -1` is 0, with no trap.
+  Floating `x % 0` is NaN and a zero result takes the divisor's sign. `fmod()`
+  is unchanged (C `fmod`, as `np.fmod`). Menudet kernels already used these rules.
+
 * Menudet JIT emits same-width typed integer bitwise operations directly instead
   of calling scalar interpreter helpers. Scalar integer/Boolean local declarations no
   longer use volatile rounding barriers, reducing stack traffic in hash kernels.

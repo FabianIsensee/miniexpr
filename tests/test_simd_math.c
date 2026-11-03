@@ -61,6 +61,19 @@ static float ldexp_ref_f(float x, float exp) {
     return ldexpf(x, (int)exp);
 }
 
+/* remainder() is NumPy's floor modulo (sign of the divisor), not C99 remainder(). */
+static double remainder_ref(double a, double b) {
+    double r = fmod(a, b);
+    if (r == 0.0) return copysign(0.0, b);
+    return (signbit(r) != 0) != (signbit(b) != 0) ? r + b : r;
+}
+
+static float remainder_ref_f(float a, float b) {
+    float r = fmodf(a, b);
+    if (r == 0.0f) return copysignf(0.0f, b);
+    return (signbit(r) != 0) != (signbit(b) != 0) ? r + b : r;
+}
+
 static void fill_input_range_f64(double *input, int n, double min_val, double max_val) {
     double span = max_val - min_val;
     for (int i = 0; i < n; i++) {
@@ -961,7 +974,7 @@ static int run_additional_edge_cases(void) {
         if (me_compile("remainder(a, b)", vars64, 2, ME_FLOAT64, &err, &expr) == ME_COMPILE_SUCCESS) {
             if (me_eval(expr, ptrs64, 2, out64, 4, NULL) == ME_EVAL_SUCCESS) {
                 for (int i = 0; i < 4; i++) {
-                    double expected = remainder(a64[i], b64[i]);
+                    double expected = remainder_ref(a64[i], b64[i]);
                     if ((isnan(expected) && !isnan(out64[i])) ||
                         (!isnan(expected) && expected != out64[i])) {
                         printf("remainder edge case failed (f64)\n");
@@ -981,7 +994,7 @@ static int run_additional_edge_cases(void) {
         if (me_compile("remainder(a, b)", vars32, 2, ME_FLOAT32, &err, &expr) == ME_COMPILE_SUCCESS) {
             if (me_eval(expr, ptrs32, 2, out32, 4, NULL) == ME_EVAL_SUCCESS) {
                 for (int i = 0; i < 4; i++) {
-                    float expected = remainderf(a32[i], b32[i]);
+                    float expected = remainder_ref_f(a32[i], b32[i]);
                     if ((isnan(expected) && !isnan(out32[i])) ||
                         (!isnan(expected) && expected != out32[i])) {
                         printf("remainder edge case failed (f32)\n");
@@ -1832,7 +1845,7 @@ int main(void) {
     failures += run_binary_pair_f64("hypot", hypot, n, -3.0, 3.0, -3.0, 3.0, 1e-12);
     failures += run_binary_pair_f64("ldexp", ldexp_ref, n, -5.0, 5.0, -4.0, 4.0, 1e-12);
     failures += run_binary_pair_f64("nextafter", nextafter, n, -2.0, 2.0, -2.0, 2.0, 0.0);
-    failures += run_binary_pair_f64("remainder", remainder, n, -5.0, 5.0, 0.5, 5.0, 1e-12);
+    failures += run_binary_pair_f64("remainder", remainder_ref, n, -5.0, 5.0, 0.5, 5.0, 1e-12);
     failures += run_ternary_pair_f64("fma", fma, n, -5.0, 5.0, -5.0, 5.0, -5.0, 5.0, 1e-11);
 
     failures += run_unary_pair_f32("abs", fabsf, n, -10.0f, 10.0f, 1e-5f);
@@ -1878,7 +1891,7 @@ int main(void) {
     failures += run_binary_pair_f32("hypot", hypotf, n, -3.0f, 3.0f, -3.0f, 3.0f, 1e-5f);
     failures += run_binary_pair_f32("ldexp", ldexp_ref_f, n, -5.0f, 5.0f, -4.0f, 4.0f, 1e-5f);
     failures += run_binary_pair_f32("nextafter", nextafterf, n, -2.0f, 2.0f, -2.0f, 2.0f, 0.0f);
-    failures += run_binary_pair_f32("remainder", remainderf, n, -5.0f, 5.0f, 0.5f, 5.0f, 1e-5f);
+    failures += run_binary_pair_f32("remainder", remainder_ref_f, n, -5.0f, 5.0f, 0.5f, 5.0f, 1e-5f);
     failures += run_ternary_pair_f32("fma", fmaf, n, -5.0f, 5.0f, -5.0f, 5.0f, -5.0f, 5.0f, 1e-5f);
 
     {
