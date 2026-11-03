@@ -9791,6 +9791,8 @@ void optimize(me_expr* n) {
         /* A constant base is folded below instead (3**2 stays a literal). */
         if (!known && IS_FUNCTION(n->type) && arity == 2 && n->function == (void*)pow) {
             me_expr *right = (me_expr*)n->parameters[1];
+            const unsigned power_flags =
+                (right && (right->flags & ME_EXPR_FLAG_FLOAT_LITERAL)) ? ME_EXPR_FLAG_FLOAT_POWER : 0;
             if (right && right->type == ME_CONSTANT && right->value == 2.0) {
                 /* Fast path: rewrite x**2 (or pow(x,2)) to x*x to avoid scalar pow in eval. */
                 me_expr *left = (me_expr*)n->parameters[0];
@@ -9799,6 +9801,7 @@ void optimize(me_expr* n) {
                     me_free(right);
                     n->parameters[1] = left_clone;
                     n->function = mul;
+                    n->flags |= power_flags;
                     apply_type_promotion(n);
                     known = 0;
                 }
@@ -9811,11 +9814,13 @@ void optimize(me_expr* n) {
                     me_expr *inner = NEW_EXPR(ME_FUNCTION2 | ME_FLAG_PURE, left, left_clone);
                     if (inner) {
                         inner->function = mul;
+                        inner->flags |= power_flags;
                         apply_type_promotion(inner);
                         me_free(right);
                         n->parameters[0] = inner;
                         n->parameters[1] = left_clone2;
                         n->function = mul;
+                        n->flags |= power_flags;
                         apply_type_promotion(n);
                         known = 0;
                     } else {

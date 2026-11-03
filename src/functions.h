@@ -103,7 +103,10 @@ enum {
      * numbers by arithmetic): a weak scalar in NumPy's sense (NEP 50), typed
      * by the operands it meets rather than by its own width. */
     ME_EXPR_FLAG_NUMBER_LITERAL = 1u << 18,
-    ME_EXPR_FLAG_FLOAT_LITERAL = 1u << 19
+    ME_EXPR_FLAG_FLOAT_LITERAL = 1u << 19,
+    /* A product optimize() made from x ** 2.0 or x ** 3.0: typed like that
+     * power, i.e. as a float function (int32 ** 3.0 is float64 in NumPy). */
+    ME_EXPR_FLAG_FLOAT_POWER = 1u << 20
 };
 
 /* Check if a pointer is a synthetic address (used internally for chunked evaluation).

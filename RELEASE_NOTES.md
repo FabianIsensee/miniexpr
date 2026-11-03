@@ -4,6 +4,12 @@ Release notes for miniexpr
 Changes from 0.2.0 to 0.2.1
 ===========================
 
+* An integer or bool base with a float exponent of 2.0 or 3.0 computes in
+  float64, as in NumPy: `int32 ** 3.0` of 2000 is 8e9. `optimize()` rewrites
+  these powers to products, which kept the integer dtype and overflowed
+  (-589934592), also with a float64 output. Integer exponents (`x ** 2`) keep the
+  integer dtype.
+
 * Behaviour change: number literals in expressions are NumPy's weak scalars
   (NEP 50). They take the dtype of the array they meet unless their kind is
   higher, independently of the output dtype: `int32 < 2.5` compares in float64
