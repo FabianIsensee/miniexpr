@@ -11,6 +11,8 @@ miniexpr automatically promotes types when necessary. The general promotion hier
 - Mixed signed/unsigned integers → the smallest signed type that holds both, as NumPy's
   `np.promote_types()` (int16 + uint8 → int16, int64 + uint32 → int64); only int64 + uint64 has no integer
   common type and becomes float64
+- True division (`/`) and `atan2`, `copysign`, `hypot`, `logaddexp`, `nextafter` of integer or bool
+  operands compute in float64, as in NumPy
 
 **Windows**: Building requires clang-cl; complex64 and complex128 are supported, including portable interpretation. DSL JIT complex kernels remain unsupported on all platforms.
 

@@ -98,7 +98,12 @@ enum {
     ME_EXPR_FLAG_WEAK_SCALAR = 1u << 15,
     /* Uniform external inputs have scalar storage; locals remain per-lane. */
     ME_EXPR_FLAG_UNIFORM_INPUT = 1u << 16,
-    ME_EXPR_FLAG_INTEGER_POWERS = 1u << 17
+    ME_EXPR_FLAG_INTEGER_POWERS = 1u << 17,
+    /* A number written in a full-evaluator expression (or folded from such
+     * numbers by arithmetic): a weak scalar in NumPy's sense (NEP 50), typed
+     * by the operands it meets rather than by its own width. */
+    ME_EXPR_FLAG_NUMBER_LITERAL = 1u << 18,
+    ME_EXPR_FLAG_FLOAT_LITERAL = 1u << 19
 };
 
 /* Check if a pointer is a synthetic address (used internally for chunked evaluation).
@@ -142,12 +147,18 @@ void me_free_parameters(me_expr* n);
 
 bool is_reduction_node(const me_expr* n);
 bool is_comparison_node(const me_expr* n);
+bool make_fixed_comparison(me_expr* cmp, int keep, bool outcome);
+bool is_logical_node(const me_expr* n);
+me_expr* new_nonzero_test(me_expr* x);
+/* Internal conversion marker created by apply_type_promotion(): arity 1, no function. */
+bool is_conversion_node(const me_expr* n);
 const char* me_comparison_operator(const me_expr* n);
 /* Internal operator spelling for typed DSL arithmetic lowering, NULL otherwise. */
 const char* me_arithmetic_operator(const me_expr* n);
 const char* me_menudet_operator(const me_expr* n);
 const char* me_menudet_math_name(const me_expr* n);
 bool is_float_math_function(const void* func);
+bool is_float_result_binary_function(const void* func);
 size_t dtype_size(me_dtype dtype);
 bool has_complex_input_types(const me_expr* n);
 bool has_unsupported_complex_function(const me_expr* n);

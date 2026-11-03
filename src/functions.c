@@ -630,6 +630,17 @@ static double all_reduce(double x) { return x * (1.0 + all_salt); }
 double min_reduce(double x) { return x + min_salt; }
 double max_reduce(double x) { return x - max_salt; }
 
+/* Binary operations whose result is floating point for integer and bool
+ * operands, as in NumPy: true division and the real two-argument functions. */
+bool is_float_result_binary_function(const void* func) {
+    return func == (void*)divide ||
+        func == (void*)atan2 ||
+        func == (void*)copysign ||
+        func == (void*)hypot ||
+        func == (void*)logaddexp ||
+        func == (void*)nextafter;
+}
+
 static float reduce_min_float32_nan_safe(const float* data, int nitems) {
     if (nitems <= 0) return INFINITY;
 #if defined(__AVX__) || defined(__AVX2__)
@@ -2830,6 +2841,30 @@ static bool is_logical_function(const void* func) {
         func == (void*)logical_not || func == (void*)logical_xor;
 }
 
+/* x != 0: the truth value NumPy takes of a non-bool where() condition. */
+me_expr* new_nonzero_test(me_expr* x) {
+    me_expr* zero = new_expr(ME_CONSTANT, 0);
+    if (!zero) return NULL;
+    zero->value = 0.0;
+    zero->dtype = x->dtype;
+    me_expr* test = NEW_EXPR(ME_FUNCTION2 | ME_FLAG_PURE, x, zero);
+    if (!test) {
+        me_free(zero);
+        return NULL;
+    }
+    test->function = cmp_ne;
+    test->dtype = ME_BOOL;
+    return test;
+}
+
+bool is_logical_node(const me_expr* n) {
+    return n && IS_FUNCTION(n->type) && is_logical_function(n->function);
+}
+
+bool is_conversion_node(const me_expr* n) {
+    return n && IS_FUNCTION(n->type) && ARITY(n->type) == 1 && n->function == NULL;
+}
+
 typedef void (*convert_func_t)(const void*, void*, int);
 static convert_func_t get_convert_func(me_dtype from, me_dtype to);
 
@@ -3007,16 +3042,24 @@ static bool compare_to_bool_output(const me_expr* n, me_dtype eval_type,
 
     const void* func = n->function;
 
+/* One loop per operand kind, so that each vectorizes whether or not the
+ * compiler unswitches a per-element constant test (that depends on how much
+ * of the caller gets inlined). */
 #define CMP_LOOP_OP(TYPE, OP) \
     do { \
         const TYPE* lptr = (const TYPE*)ldata; \
         const TYPE* rptr = (const TYPE*)rdata; \
-        TYPE lc = (TYPE)lval; \
-        TYPE rc = (TYPE)rval; \
-        for (int i = 0; i < nitems; i++) { \
-            TYPE a = lconst ? lc : lptr[i]; \
-            TYPE b = rconst ? rc : rptr[i]; \
-            out[i] = (a OP b); \
+        const TYPE lc = (TYPE)lval; \
+        const TYPE rc = (TYPE)rval; \
+        if (lconst && rconst) { \
+            const bool v = (lc OP rc); \
+            for (int i = 0; i < nitems; i++) out[i] = v; \
+        } else if (rconst) { \
+            for (int i = 0; i < nitems; i++) out[i] = (lptr[i] OP rc); \
+        } else if (lconst) { \
+            for (int i = 0; i < nitems; i++) out[i] = (lc OP rptr[i]); \
+        } else { \
+            for (int i = 0; i < nitems; i++) out[i] = (lptr[i] OP rptr[i]); \
         } \
     } while (0)
 
@@ -4042,6 +4085,26 @@ bool me_menudet_string_execute(const me_expr *n, const void *const *values, void
 static bool eval_bool_expr(me_expr* n) {
     if (!n || !n->output) return false;
 
+    /* A bool-to-bool conversion node is only a type boundary (the typing
+     * pass puts one around each comparison under and/or/not): evaluate its
+     * source straight into this output. */
+    if (is_conversion_node(n) && n->dtype == ME_BOOL) {
+        me_expr* source = (me_expr*)n->parameters[0];
+        if (!source || source->dtype != ME_BOOL) return false;
+        if (source->type == ME_VARIABLE) {
+            memcpy(n->output, source->bound, (size_t)n->nitems * sizeof(bool));
+            return true;
+        }
+        void* saved_output = source->output;
+        const int saved_nitems = source->nitems;
+        source->output = n->output;
+        source->nitems = n->nitems;
+        const bool ok = eval_bool_expr(source);
+        source->output = saved_output;
+        source->nitems = saved_nitems;
+        return ok;
+    }
+
     if (n->type == ME_CONSTANT) {
         bool val = (bool)(n->value != 0.0);
         bool* out = (bool*)n->output;
@@ -4698,6 +4761,12 @@ static me_expr* base(state* s) {
             if (s->dtype == ME_INT64) ret->flags |= ME_EXPR_FLAG_INTEGER_LITERAL;
             ret->integer_magnitude = s->integer_magnitude;
             ret->literal_f32 = s->literal_f32;
+        }
+        else {
+            ret->flags |= ME_EXPR_FLAG_NUMBER_LITERAL;
+            if (is_float_dtype(s->dtype) || is_complex_dtype(s->dtype)) {
+                ret->flags |= ME_EXPR_FLAG_FLOAT_LITERAL;
+            }
         }
         // Use inferred type for constants (floating point vs integer)
         if (s->target_dtype == ME_AUTO) {
@@ -6747,7 +6816,8 @@ static void me_eval_##SUFFIX(const me_expr *n) { \
             if (is_conv_node) { \
                 /* Conversion node: evaluate child with native dtype, then convert */ \
                 me_expr *source = (me_expr*)n->parameters[0]; \
-                me_dtype source_dtype = n->input_dtype; \
+                /* private_eval() writes the source in its own dtype. */ \
+                me_dtype source_dtype = source->dtype; \
                 size_t source_size = dtype_size(source_dtype); \
                 \
                 if (source->type != ME_CONSTANT && source->type != ME_VARIABLE) { \
@@ -6768,6 +6838,10 @@ static void me_eval_##SUFFIX(const me_expr *n) { \
                     convert_func_t conv = get_convert_func(source_dtype, ME_EVAL_DTYPE_##SUFFIX); \
                     if (conv) { \
                         conv(src_data, output, n->nitems); \
+                    } \
+                    else if (dtype_size(source_dtype) == sizeof(TYPE)) { \
+                        /* Same dtype (the node is only a type boundary). */ \
+                        memcpy(output, src_data, (size_t)n->nitems * sizeof(TYPE)); \
                     } \
                 } \
                 break; \
@@ -9735,6 +9809,18 @@ static me_expr* clone_expr(const me_expr* src) {
     return clone;
 }
 
+/* Gives a comparison a fixed outcome while it still reads operand `keep`
+ * (an integer, so x == x always holds): the typing pass uses it for
+ * comparisons with literals outside every integer range. False on OOM. */
+bool make_fixed_comparison(me_expr* cmp, int keep, bool outcome) {
+    me_expr* copy = clone_expr((const me_expr*)cmp->parameters[keep]);
+    if (!copy) return false;
+    me_free((me_expr*)cmp->parameters[1 - keep]);
+    cmp->parameters[1 - keep] = copy;
+    cmp->function = outcome ? (void*)cmp_eq : (void*)cmp_ne;
+    return true;
+}
+
 /* Thread-safe chunked evaluation using expression cloning.
  * This function is safe to call from multiple threads simultaneously,
  * even on the same expression object. Each call creates a temporary
@@ -9914,6 +10000,22 @@ cleanup:
 }
 
 
+/* Arithmetic of number literals is a number literal again, as in Python
+ * (-1.5, 2 * 3, 1 / 2); a function of literals (sin(1.0)) is a NumPy
+ * float64 scalar in NumPy, i.e. strong. */
+static unsigned folded_literal_flags(const me_expr* n, double value) {
+    const bool arithmetic = me_arithmetic_operator(n) != NULL ||
+        (ARITY(n->type) == 2 && n->function == (void*)pow);
+    if (!arithmetic) return 0;
+    bool is_float = n->function == (void*)divide || value != floor(value);
+    for (int i = 0; i < ARITY(n->type); i++) {
+        const me_expr* arg = (const me_expr*)n->parameters[i];
+        if (!(arg->flags & ME_EXPR_FLAG_NUMBER_LITERAL)) return 0;
+        is_float |= (arg->flags & ME_EXPR_FLAG_FLOAT_LITERAL) != 0;
+    }
+    return ME_EXPR_FLAG_NUMBER_LITERAL | (is_float ? ME_EXPR_FLAG_FLOAT_LITERAL : 0);
+}
+
 void optimize(me_expr* n) {
     /* Evaluates as much as possible. */
     if (!n) return;
@@ -9932,7 +10034,8 @@ void optimize(me_expr* n) {
                 known = 0;
             }
         }
-        if (IS_FUNCTION(n->type) && arity == 2 && n->function == (void*)pow) {
+        /* A constant base is folded below instead (3**2 stays a literal). */
+        if (!known && IS_FUNCTION(n->type) && arity == 2 && n->function == (void*)pow) {
             me_expr *right = (me_expr*)n->parameters[1];
             if (right && right->type == ME_CONSTANT && right->value == 2.0) {
                 /* Fast path: rewrite x**2 (or pow(x,2)) to x*x to avoid scalar pow in eval. */
@@ -9973,9 +10076,15 @@ void optimize(me_expr* n) {
         }
         if (known) {
             const double value = me_eval_scalar(n);
+            /* Type the folded constant from its operands (-1.5 like 1.5), not
+             * by the call's provisional parse-time dtype. */
+            const me_dtype dtype = infer_output_type(n);
+            const unsigned literal_flags = folded_literal_flags(n, value);
             me_free_parameters(n);
             n->type = ME_CONSTANT;
             n->value = value;
+            n->dtype = dtype;
+            n->flags |= literal_flags;
         }
     }
 }
