@@ -8,6 +8,9 @@ miniexpr automatically promotes types when necessary. The general promotion hier
 - Integer types → Float types
 - Lower precision → Higher precision
 - Real types → Complex types (when complex is involved)
+- Mixed signed/unsigned integers → the smallest signed type that holds both, as NumPy's
+  `np.promote_types()` (int16 + uint8 → int16, int64 + uint32 → int64); only int64 + uint64 has no integer
+  common type and becomes float64
 
 **Windows**: Building requires clang-cl; complex64 and complex128 are supported, including portable interpretation. DSL JIT complex kernels remain unsupported on all platforms.
 

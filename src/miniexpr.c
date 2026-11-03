@@ -243,7 +243,9 @@ int64_t dsl_i64_addmul_wrap(int64_t acc, int64_t a, int64_t b) {
 #define INFINITY (1.0/0.0)
 #endif
 
-/* Type promotion table following NumPy rules */
+/* Type promotion table following NumPy rules (np.promote_types): a signed
+ * integer mixed with a narrower unsigned one keeps the signed type, and only
+ * int64 with uint64 has no integer common type (float64). */
 /* Note: ME_AUTO (0) should never appear in type promotion, so we index from 1 */
 static const me_dtype type_promotion_table[13][13] = {
     /* Rows: left operand, Columns: right operand */
@@ -257,27 +259,27 @@ static const me_dtype type_promotion_table[13][13] = {
         ME_FLOAT64, ME_COMPLEX64, ME_COMPLEX128
     }, /* INT8 */
     {
-        ME_INT16, ME_INT16, ME_INT16, ME_INT32, ME_INT64, ME_INT32, ME_INT32, ME_INT64, ME_FLOAT64, ME_FLOAT32,
+        ME_INT16, ME_INT16, ME_INT16, ME_INT32, ME_INT64, ME_INT16, ME_INT32, ME_INT64, ME_FLOAT64, ME_FLOAT32,
         ME_FLOAT64, ME_COMPLEX64, ME_COMPLEX128
     }, /* INT16 */
     {
-        ME_INT32, ME_INT32, ME_INT32, ME_INT32, ME_INT64, ME_INT64, ME_INT64, ME_INT64, ME_FLOAT64, ME_FLOAT64,
+        ME_INT32, ME_INT32, ME_INT32, ME_INT32, ME_INT64, ME_INT32, ME_INT32, ME_INT64, ME_FLOAT64, ME_FLOAT64,
         ME_FLOAT64, ME_COMPLEX128, ME_COMPLEX128
     }, /* INT32 */
     {
-        ME_INT64, ME_INT64, ME_INT64, ME_INT64, ME_INT64, ME_FLOAT64, ME_FLOAT64, ME_FLOAT64, ME_FLOAT64, ME_FLOAT64,
+        ME_INT64, ME_INT64, ME_INT64, ME_INT64, ME_INT64, ME_INT64, ME_INT64, ME_INT64, ME_FLOAT64, ME_FLOAT64,
         ME_FLOAT64, ME_COMPLEX128, ME_COMPLEX128
     }, /* INT64 */
     {
-        ME_UINT8, ME_INT16, ME_INT32, ME_INT64, ME_FLOAT64, ME_UINT8, ME_UINT16, ME_UINT32, ME_UINT64, ME_FLOAT32,
+        ME_UINT8, ME_INT16, ME_INT16, ME_INT32, ME_INT64, ME_UINT8, ME_UINT16, ME_UINT32, ME_UINT64, ME_FLOAT32,
         ME_FLOAT64, ME_COMPLEX64, ME_COMPLEX128
     }, /* UINT8 */
     {
-        ME_UINT16, ME_INT32, ME_INT32, ME_INT64, ME_FLOAT64, ME_UINT16, ME_UINT16, ME_UINT32, ME_UINT64, ME_FLOAT32,
+        ME_UINT16, ME_INT32, ME_INT32, ME_INT32, ME_INT64, ME_UINT16, ME_UINT16, ME_UINT32, ME_UINT64, ME_FLOAT32,
         ME_FLOAT64, ME_COMPLEX64, ME_COMPLEX128
     }, /* UINT16 */
     {
-        ME_UINT32, ME_INT64, ME_INT64, ME_INT64, ME_FLOAT64, ME_UINT32, ME_UINT32, ME_UINT32, ME_UINT64, ME_FLOAT64,
+        ME_UINT32, ME_INT64, ME_INT64, ME_INT64, ME_INT64, ME_UINT32, ME_UINT32, ME_UINT32, ME_UINT64, ME_FLOAT64,
         ME_FLOAT64, ME_COMPLEX128, ME_COMPLEX128
     }, /* UINT32 */
     {

@@ -4,6 +4,10 @@ Release notes for miniexpr
 Changes from 0.2.0 to 0.2.1
 ===========================
 
+* Mixed signed/unsigned integers promote as in NumPy: int16 + uint8 is int16
+  and int64 + uint32 is int64 (they were widened one step further, and int64
+  with a narrower unsigned type went to float64).
+
 * Menudet JIT emits same-width typed integer bitwise operations directly instead
   of calling scalar interpreter helpers. Scalar integer/Boolean local declarations no
   longer use volatile rounding barriers, reducing stack traffic in hash kernels.
