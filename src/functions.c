@@ -633,6 +633,15 @@ bool is_float_result_binary_function(const void* func) {
         func == (void*)nextafter;
 }
 
+/* Functions whose NumPy ufunc has no bool loop: with bool operands they
+ * compute in int8 (np.square(bool), bool ** bool, np.fmod(bool, bool)). */
+bool is_int8_for_bool_function(const void* func) {
+    return func == (void*)pow ||
+        func == (void*)square ||
+        func == (void*)fmod ||
+        func == (void*)remainder;
+}
+
 static float reduce_min_float32_nan_safe(const float* data, int nitems) {
     if (nitems <= 0) return INFINITY;
 #if defined(__AVX__) || defined(__AVX2__)
@@ -9788,8 +9797,15 @@ void optimize(me_expr* n) {
                 known = 0;
             }
         }
-        /* A constant base is folded below instead (3**2 stays a literal). */
-        if (!known && IS_FUNCTION(n->type) && arity == 2 && n->function == (void*)pow) {
+        /* A constant base is folded below instead (3**2 stays a literal). A
+         * bool base (a comparison has no final dtype yet) keeps the power,
+         * whose dtype the product would lose (NumPy: bool ** 2 is int8,
+         * bool ** 3 is int64). */
+        const me_expr *pow_base = arity == 2 ? (const me_expr*)n->parameters[0] : NULL;
+        while (pow_base && is_conversion_node(pow_base)) pow_base = (const me_expr*)pow_base->parameters[0];
+        const bool bool_base = pow_base && (pow_base->dtype == ME_BOOL || is_comparison_node(pow_base) ||
+                                            is_logical_node(pow_base));
+        if (!known && IS_FUNCTION(n->type) && arity == 2 && n->function == (void*)pow && !bool_base) {
             me_expr *right = (me_expr*)n->parameters[1];
             const unsigned power_flags =
                 (right && (right->flags & ME_EXPR_FLAG_FLOAT_LITERAL)) ? ME_EXPR_FLAG_FLOAT_POWER : 0;

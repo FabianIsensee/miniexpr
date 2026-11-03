@@ -1600,6 +1600,16 @@ static me_dtype retype_value_dtype(const me_expr* n) {
         (is_float_result_binary_function(n->function) || (n->flags & ME_EXPR_FLAG_FLOAT_POWER))) {
         return promote_float_math_result(result);
     }
+    if (IS_FUNCTION(n->type) && is_int8_for_bool_function(n->function)) {
+        if (result == ME_BOOL) return ME_INT8;
+        /* NumPy computes bool_array ** 2 as np.square(), not with the int64
+         * of a weak 2 (bool ** 3 is int64). */
+        const me_expr* exponent = arity == 2 ? (const me_expr*)n->parameters[1] : NULL;
+        if (n->function == (void*)pow && arg0->dtype == ME_BOOL && retype_is_weak(exponent) &&
+            !(exponent->flags & ME_EXPR_FLAG_FLOAT_LITERAL) && exponent->value == 2.0) {
+            return ME_INT8;
+        }
+    }
     return result;
 }
 
@@ -2059,7 +2069,14 @@ int private_compile_profile_ex(const char* expression, const me_variable* variab
 
         // If dtype is ME_AUTO, infer from expression; otherwise honor explicit dtype.
         if (dtype == ME_AUTO) {
-            root->dtype = infer_output_type(root);
+            /* The typing pass gave every numeric node its dtype; re-inferring
+             * it from the operands misses its rules (square(int8 < 1) is
+             * int8, and its comparison operand computes in int8 too). String
+             * operations keep their own inference. */
+            if (!(IS_FUNCTION(root->type) || IS_CLOSURE(root->type)) || retype_is_string_operation(root) ||
+                retype_is_string_valued(root)) {
+                root->dtype = infer_output_type(root);
+            }
         }
         else {
             me_dtype inferred_dtype = infer_output_type(root);
