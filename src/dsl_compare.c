@@ -742,7 +742,7 @@ static void chain_mark_c_groups(const char *text, int *opens, int *closes, const
     }
 }
 
-char *dsl_c_grouping(const char *text) {
+static char *dsl_c_grouping_raw(const char *text) {
     size_t len = strlen(text);
     if (!chain_c_grouping_candidate(text)) {
         return chain_copy(text, text + len);
@@ -789,6 +789,46 @@ char *dsl_c_grouping(const char *text) {
         free(node);
     }
     return out;
+}
+
+/* Python reads --x as -(-x) and ++x as +(+x); C would decrement/increment.
+ * Separates such pairs outside string literals (DSL has no ++/--). */
+static char *dsl_c_split_sign_pairs(char *text) {
+    if (!text || (!strstr(text, "--") && !strstr(text, "++"))) return text;
+    size_t len = strlen(text);
+    char *out = malloc(2 * len + 1);
+    if (!out) {
+        free(text);
+        return NULL;
+    }
+    size_t o = 0;
+    char quote = 0;
+    for (size_t i = 0; i < len; i++) {
+        char c = text[i];
+        if (quote) {
+            if (c == '\\' && i + 1 < len) {
+                out[o++] = c;
+                c = text[++i];
+            }
+            else if (c == quote) {
+                quote = 0;
+            }
+        }
+        else if (c == '"' || c == '\'') {
+            quote = c;
+        }
+        out[o++] = c;
+        if (!quote && (c == '-' || c == '+') && text[i + 1] == c) {
+            out[o++] = ' ';
+        }
+    }
+    out[o] = 0;
+    free(text);
+    return out;
+}
+
+char *dsl_c_grouping(const char *text) {
+    return dsl_c_split_sign_pairs(dsl_c_grouping_raw(text));
 }
 
 bool dsl_lower_comparisons(me_dsl_program *program, const char *source, me_dsl_error *error) {

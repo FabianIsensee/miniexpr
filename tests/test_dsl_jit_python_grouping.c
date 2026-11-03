@@ -150,6 +150,9 @@ static int check_values(void) {
         {"where(not a == b, a, c)", {-3, -1, 0, 1, 2, 3}},
         /* A chain with a ~ operand (the chain lowering rejected ~). */
         {"-3 < ~a < 2", {0, 1, 1, 1, 0, 0}},
+        /* Python's --a is -(-a); C would decrement. */
+        {"--a", {-3, -1, 0, 1, 2, 3}},
+        {"b--a", {-1, 2, 1, 3, 2, 4}},
     };
     int64_t probe[N];
     bool available = false;
