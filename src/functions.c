@@ -9888,7 +9888,16 @@ void optimize(me_expr* n) {
         /* A constant base is folded below instead (3**2 stays a literal). */
         if (!known && IS_FUNCTION(n->type) && arity == 2 && n->function == (void*)pow) {
             me_expr *right = (me_expr*)n->parameters[1];
-            if (right && right->type == ME_CONSTANT && right->value == 2.0) {
+            /* Only a number literal exponent becomes a product: an integer
+             * literal (2) keeps the base's dtype, a float literal (2.0) makes
+             * a float power. A folded constant (abs(-2), sqrt(9.0)) is a
+             * strong NumPy scalar whose dtype promotes the base's (int8 **
+             * abs(-2) is int64), so that power stays a pow() for the typing
+             * pass. */
+            const bool literal_exponent = right && (right->flags & ME_EXPR_FLAG_NUMBER_LITERAL);
+            const unsigned power_flags = ME_EXPR_FLAG_POWER_PRODUCT |
+                (literal_exponent && (right->flags & ME_EXPR_FLAG_FLOAT_LITERAL) ? ME_EXPR_FLAG_FLOAT_POWER : 0);
+            if (literal_exponent && right->type == ME_CONSTANT && right->value == 2.0) {
                 /* Fast path: rewrite x**2 (or pow(x,2)) to x*x to avoid scalar pow in eval. */
                 me_expr *left = (me_expr*)n->parameters[0];
                 me_expr *left_clone = clone_expr(left);
@@ -9896,11 +9905,11 @@ void optimize(me_expr* n) {
                     me_free(right);
                     n->parameters[1] = left_clone;
                     n->function = mul;
-                    n->flags |= ME_EXPR_FLAG_POWER_PRODUCT;
+                    n->flags |= power_flags;
                     apply_type_promotion(n);
                     known = 0;
                 }
-            } else if (right && right->type == ME_CONSTANT && right->value == 3.0) {
+            } else if (literal_exponent && right->type == ME_CONSTANT && right->value == 3.0) {
                 /* Fast path: rewrite x**3 (or pow(x,3)) to x*x*x to avoid scalar pow in eval. */
                 me_expr *left = (me_expr*)n->parameters[0];
                 me_expr *left_clone = clone_expr(left);
@@ -9909,13 +9918,13 @@ void optimize(me_expr* n) {
                     me_expr *inner = NEW_EXPR(ME_FUNCTION2 | ME_FLAG_PURE, left, left_clone);
                     if (inner) {
                         inner->function = mul;
-                        inner->flags |= ME_EXPR_FLAG_POWER_PRODUCT;
+                        inner->flags |= power_flags;
                         apply_type_promotion(inner);
                         me_free(right);
                         n->parameters[0] = inner;
                         n->parameters[1] = left_clone2;
                         n->function = mul;
-                        n->flags |= ME_EXPR_FLAG_POWER_PRODUCT;
+                        n->flags |= power_flags;
                         apply_type_promotion(n);
                         known = 0;
                     } else {
