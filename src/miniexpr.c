@@ -1616,8 +1616,10 @@ static me_dtype retype_value_dtype(const me_expr* n) {
         return ME_BOOL;
     }
     const me_dtype result = retype_promote_operands(n, 0, arity);
-    /* int / int is float64 (and so is bool / bool), like hypot(int, int). */
-    if (IS_FUNCTION(n->type) && arity == 2 && is_float_result_binary_function(n->function)) {
+    /* int / int is float64 (and so is bool / bool), like hypot(int, int);
+     * so is int ** 2.0, which optimize() turned into a product. */
+    if (IS_FUNCTION(n->type) && arity == 2 &&
+        (is_float_result_binary_function(n->function) || (n->flags & ME_EXPR_FLAG_FLOAT_POWER))) {
         return promote_float_math_result(result);
     }
     /* ldexp(x, n) takes the float dtype of x alone (ldexp(float32, int64) is

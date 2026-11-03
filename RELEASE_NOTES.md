@@ -25,6 +25,14 @@ Changes from 0.2.0 to 0.2.1
   pre-decrement (`x - 1`). Comparison chains accept `~` operands
   (`0 < ~x < 5` was rejected).
 
+* An integer or bool base with a float exponent of 2.0 or 3.0 computes in
+  float64, as in NumPy: `int32 ** 3.0` of 2000 is 8e9. `optimize()` rewrites
+  these powers to products, which kept the integer dtype and overflowed
+  (-589934592), also with a float64 output. Integer exponents (`x ** 2`) keep the
+  integer dtype. A folded exponent (`x ** abs(-2)`, `x ** sqrt(9.0)`) is a
+  strong NumPy scalar and stays a `pow()`: int8 `** abs(-2)` is int64, float32
+  `** sqrt(9.0)` is float64.
+
 * Behaviour change: number literals in expressions are NumPy's weak scalars
   (NEP 50). They take the dtype of the array they meet unless their kind is
   higher, independently of the output dtype: with a bool output `int32 < 2.5`
