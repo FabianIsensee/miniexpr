@@ -4,6 +4,10 @@ Release notes for miniexpr
 Changes from 0.2.0 to 0.2.1
 ===========================
 
+* Complex expressions accept negative literals and negated operands
+  (`c * -2`, `c + -1`, `c * -c`, `c ** -2`), which failed to compile with
+  `ME_COMPILE_ERR_INVALID_ARG_TYPE`.
+
 * Expression trees are retyped after parsing and optimization, so mixed-dtype
   expressions no longer convert values between buffers of the wrong dtype
   (wrong results and heap overflows such as int16 `(i + i) * abs(i)`), and a
