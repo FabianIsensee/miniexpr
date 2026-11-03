@@ -469,6 +469,11 @@ static bool me_jit_expr_contains_unsupported_tokens(const char *expr, me_dtype d
     if (!expr) {
         return true;
     }
+    /* The generated C calls the double nextafter(), whose step is a float64
+     * ulp; float32 expressions need nextafterf() and stay on the interpreter. */
+    if (dtype == ME_FLOAT32 && strstr(expr, "nextafter")) {
+        return true;
+    }
     for (const char *p = expr; *p; p++) {
         char c = *p;
         if (in_string) {
