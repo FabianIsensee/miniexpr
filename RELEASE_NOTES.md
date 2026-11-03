@@ -9,7 +9,12 @@ Changes from 0.2.0 to 0.2.1
   `a ** (b ** c)` (was `(a ** b) ** c`), and in plain expressions `a < b < c` is
   `(a < b) and (b < c)` (was `(a < b) < c`; DSL kernels already chained). The
   `ME_POW_FROM_RIGHT` source option is removed. Write `(-x) ** 2` to keep the old
-  meaning.
+  meaning. Function arguments accept `not`/`and`/`or` (`where(a > 0 and b > 0, x, y)`).
+
+* DSL JIT kernels group `not` and `&`/`^`/`|` around comparisons as Python and
+  the interpreter do. Generated C used C's precedence, so `x & 1 == 0` computed
+  `x & (1 == 0)` and `not a == b` computed `(not a) == b`. Comparison chains
+  accept `~` operands (`0 < ~x < 5` was rejected).
 
 * Menudet JIT emits same-width typed integer bitwise operations directly instead
   of calling scalar interpreter helpers. Scalar integer/Boolean local declarations no
