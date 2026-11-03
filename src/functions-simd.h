@@ -76,6 +76,8 @@ void vec_fdim_dispatch(const double* a, const double* b, double* out, int n);
 void vec_fmax_dispatch(const double* a, const double* b, double* out, int n);
 void vec_fmin_dispatch(const double* a, const double* b, double* out, int n);
 void vec_fmod_dispatch(const double* a, const double* b, double* out, int n);
+/* NumPy floor modulo (np.remainder, the `%` operator); see me_floor_mod.h. */
+void vec_floor_mod_dispatch(const double* a, const double* b, double* out, int n);
 void vec_hypot_dispatch(const double* a, const double* b, double* out, int n);
 void vec_ldexp_dispatch(const double* a, const double* b, double* out, int n);
 void vec_nextafter_dispatch(const double* a, const double* b, double* out, int n);
@@ -123,6 +125,7 @@ void vec_fdim_f32_dispatch(const float* a, const float* b, float* out, int n);
 void vec_fmax_f32_dispatch(const float* a, const float* b, float* out, int n);
 void vec_fmin_f32_dispatch(const float* a, const float* b, float* out, int n);
 void vec_fmod_f32_dispatch(const float* a, const float* b, float* out, int n);
+void vec_floor_mod_f32_dispatch(const float* a, const float* b, float* out, int n);
 void vec_hypot_f32_dispatch(const float* a, const float* b, float* out, int n);
 void vec_ldexp_f32_dispatch(const float* a, const float* b, float* out, int n);
 void vec_nextafter_f32_dispatch(const float* a, const float* b, float* out, int n);

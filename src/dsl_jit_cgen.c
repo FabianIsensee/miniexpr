@@ -507,6 +507,12 @@ static bool me_jit_expr_contains_unsupported_tokens(const char *expr, me_dtype d
     if (!expr) {
         return true;
     }
+    /* remainder() is NumPy floor modulo, which the generated C (C99
+     * remainder(), double only) does not give; kernels using it stay on the
+     * interpreter, as for %. */
+    if (strstr(expr, "remainder")) {
+        return true;
+    }
     for (const char *p = expr; *p; p++) {
         char c = *p;
         if (in_string) {

@@ -53,6 +53,16 @@ Changes from 0.2.0 to 0.2.1
   constant `where()` condition selects by its truth also with a bool output
   (`where(0.5, a, 2) > 0` read 0.5 as 0).
 
+* Behavior change: the `%` operator and `remainder()` now follow NumPy
+  (`np.remainder`, floor modulo) in expressions and full-profile DSL kernels:
+  the result takes the sign of the divisor (`-7 % 3 == 2`, `7 % -3 == -2`,
+  `-7.0 % 3.0 == 2.0`). Previously `%` was C `fmod` and `remainder()` was C99
+  `remainder()`. Integer nodes are computed exactly in their own width; `x % 0`
+  is 0 and `MIN % -1` is 0, with no trap. Floating `x % 0` is NaN and a zero
+  result takes the divisor's sign. DSL JIT kernels that call `remainder()` run
+  on the interpreter (as for `%`); the codegen cache version is bumped. `fmod()`
+  is unchanged (C `fmod`, as `np.fmod`). Menudet kernels already used these rules.
+
 * Menudet JIT emits same-width typed integer bitwise operations directly instead
   of calling scalar interpreter helpers. Scalar integer/Boolean local declarations no
   longer use volatile rounding barriers, reducing stack traffic in hash kernels.
