@@ -5434,8 +5434,9 @@ static double me_eval_scalar(const me_expr* n) {
             case ME_UINT32: return (double)(uint32_t)v;
             case ME_UINT64: return (double)(uint64_t)v;
             case ME_FLOAT32: return (double)(float)v;
-            case ME_COMPLEX64:
-            case ME_COMPLEX128:
+            /* A scalar here is real, so its complex value is its real part. */
+            case ME_COMPLEX64: return (double)(float)v;
+            case ME_COMPLEX128: return v;
             case ME_STRING:
             case ME_BYTES:
             default:
@@ -10231,6 +10232,8 @@ static bool is_complex_supported_function(const me_expr* n) {
     if (!n || !IS_FUNCTION(n->type)) return true;
     if (is_reduction_node(n)) return true;
     if (is_comparison_node(n)) return false;
+    /* The parser's own conversions, e.g. around negate(2) in c * -2. */
+    if (is_conversion_node(n)) return true;
 
     const int arity = ARITY(n->type);
     const void* func = n->function;
