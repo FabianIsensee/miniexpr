@@ -5704,13 +5704,13 @@ static void vec_mul_scalar_c64(const float _Complex* a, float _Complex b, float 
 static void vec_pow_c64(const float _Complex* a, const float _Complex* b, float _Complex* out, int n) {
     int i;
     IVDEP
-    for (i = 0; i < n; i++) out[i] = me_cpowf(a[i], b[i]);
+    for (i = 0; i < n; i++) out[i] = me_npy_cpowf(a[i], b[i]);
 }
 
 static void vec_pow_scalar_c64(const float _Complex* a, float _Complex b, float _Complex* out, int n) {
     int i;
     IVDEP
-    for (i = 0; i < n; i++) out[i] = me_cpowf(a[i], b);
+    for (i = 0; i < n; i++) out[i] = me_npy_cpowf(a[i], b);
 }
 
 static void vec_sqrt_c64(const float _Complex* a, float _Complex* out, int n) {
@@ -5776,13 +5776,13 @@ static void vec_mul_scalar_c128(const double _Complex* a, double _Complex b, dou
 static void vec_pow_c128(const double _Complex* a, const double _Complex* b, double _Complex* out, int n) {
     int i;
     IVDEP
-    for (i = 0; i < n; i++) out[i] = me_cpow(a[i], b[i]);
+    for (i = 0; i < n; i++) out[i] = me_npy_cpow(a[i], b[i]);
 }
 
 static void vec_pow_scalar_c128(const double _Complex* a, double _Complex b, double _Complex* out, int n) {
     int i;
     IVDEP
-    for (i = 0; i < n; i++) out[i] = me_cpow(a[i], b);
+    for (i = 0; i < n; i++) out[i] = me_npy_cpow(a[i], b);
 }
 
 static void vec_sqrt_c128(const double _Complex* a, double _Complex* out, int n) {
@@ -6595,6 +6595,10 @@ static void me_eval_##SUFFIX(const me_expr *n) { \
                         VEC_POW(ldata, rdata, output, n->nitems); \
                     } else if (ldata && right->type == ME_CONSTANT) { \
                         VEC_POW_SCALAR(ldata, TO_TYPE_##SUFFIX(right->value), output, n->nitems); \
+                    } else if (ME_EVAL_IS_COMPLEX_##SUFFIX && left->type == ME_CONSTANT && rdata) { \
+                        /* The generic path below computes in double, without the imaginary part. */ \
+                        for (i = 0; i < n->nitems; i++) output[i] = TO_TYPE_##SUFFIX(left->value); \
+                        VEC_POW(output, rdata, output, n->nitems); \
                     } else { \
                         goto general_case_binary_##SUFFIX; \
                     } \
@@ -7163,10 +7167,10 @@ static void me_eval_##SUFFIX(const me_expr *n) { \
 #define vec_sub_c64(a, b, out, n) do { for (int _i = 0; _i < (n); _i++) (out)[_i] = (a)[_i] - (b)[_i]; } while(0)
 #define vec_mul_c64(a, b, out, n) do { for (int _i = 0; _i < (n); _i++) (out)[_i] = mul_c64((a)[_i], (b)[_i]); } while(0)
 #define vec_div_c64(a, b, out, n) do { for (int _i = 0; _i < (n); _i++) (out)[_i] = (a)[_i] / (b)[_i]; } while(0)
-#define vec_pow_c64(a, b, out, n) do { for (int _i = 0; _i < (n); _i++) (out)[_i] = me_cpowf((a)[_i], (b)[_i]); } while(0)
+#define vec_pow_c64(a, b, out, n) do { for (int _i = 0; _i < (n); _i++) (out)[_i] = me_npy_cpowf((a)[_i], (b)[_i]); } while(0)
 #define vec_add_scalar_c64(a, b, out, n) do { for (int _i = 0; _i < (n); _i++) (out)[_i] = (a)[_i] + (b); } while(0)
 #define vec_mul_scalar_c64(a, b, out, n) do { for (int _i = 0; _i < (n); _i++) (out)[_i] = mul_c64((a)[_i], (b)); } while(0)
-#define vec_pow_scalar_c64(a, b, out, n) do { for (int _i = 0; _i < (n); _i++) (out)[_i] = me_cpowf((a)[_i], (b)); } while(0)
+#define vec_pow_scalar_c64(a, b, out, n) do { for (int _i = 0; _i < (n); _i++) (out)[_i] = me_npy_cpowf((a)[_i], (b)); } while(0)
 #define vec_sqrt_c64(a, out, n) do { for (int _i = 0; _i < (n); _i++) (out)[_i] = me_csqrtf((a)[_i]); } while(0)
 #define vec_negame_c64(a, out, n) do { for (int _i = 0; _i < (n); _i++) (out)[_i] = -(a)[_i]; } while(0)
 #define vec_conj_c64(a, out, n) do { for (int _i = 0; _i < (n); _i++) (out)[_i] = me_conjf((a)[_i]); } while(0)
@@ -7178,10 +7182,10 @@ static void me_eval_##SUFFIX(const me_expr *n) { \
 #define vec_sub_c128(a, b, out, n) do { for (int _i = 0; _i < (n); _i++) (out)[_i] = (a)[_i] - (b)[_i]; } while(0)
 #define vec_mul_c128(a, b, out, n) do { for (int _i = 0; _i < (n); _i++) (out)[_i] = mul_c128((a)[_i], (b)[_i]); } while(0)
 #define vec_div_c128(a, b, out, n) do { for (int _i = 0; _i < (n); _i++) (out)[_i] = (a)[_i] / (b)[_i]; } while(0)
-#define vec_pow_c128(a, b, out, n) do { for (int _i = 0; _i < (n); _i++) (out)[_i] = me_cpow((a)[_i], (b)[_i]); } while(0)
+#define vec_pow_c128(a, b, out, n) do { for (int _i = 0; _i < (n); _i++) (out)[_i] = me_npy_cpow((a)[_i], (b)[_i]); } while(0)
 #define vec_add_scalar_c128(a, b, out, n) do { for (int _i = 0; _i < (n); _i++) (out)[_i] = (a)[_i] + (b); } while(0)
 #define vec_mul_scalar_c128(a, b, out, n) do { for (int _i = 0; _i < (n); _i++) (out)[_i] = mul_c128((a)[_i], (b)); } while(0)
-#define vec_pow_scalar_c128(a, b, out, n) do { for (int _i = 0; _i < (n); _i++) (out)[_i] = me_cpow((a)[_i], (b)); } while(0)
+#define vec_pow_scalar_c128(a, b, out, n) do { for (int _i = 0; _i < (n); _i++) (out)[_i] = me_npy_cpow((a)[_i], (b)); } while(0)
 #define vec_sqrt_c128(a, out, n) do { for (int _i = 0; _i < (n); _i++) (out)[_i] = me_csqrt((a)[_i]); } while(0)
 #define vec_negame_c128(a, out, n) do { for (int _i = 0; _i < (n); _i++) (out)[_i] = -(a)[_i]; } while(0)
 #define vec_conj_c128(a, out, n) do { for (int _i = 0; _i < (n); _i++) (out)[_i] = me_conj((a)[_i]); } while(0)
