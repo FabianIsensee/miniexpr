@@ -4,6 +4,11 @@ Release notes for miniexpr
 Changes from 0.2.0 to 0.2.1
 ===========================
 
+* `x ** 0.5` and `x ** -1` of float arrays compute as NumPy does, with `sqrt()`
+  and `1 / x` instead of `pow()` (complex `x ** 0.5` with `csqrt()`): results are
+  exact, `(-inf) ** 0.5` is NaN (was inf) and `(-0.0) ** 0.5` is -0.0 (was 0.0).
+  Integer bases keep `pow()`, as in NumPy.
+
 * Inferred dtypes of power, `square()`, `%`, `fmod()` and `remainder()` of bool
   operands follow NumPy, which has no bool loop for them: `bool ** bool`,
   `bool ** 2` (NumPy squares), `square(bool)` and `bool % bool` are int8, and
