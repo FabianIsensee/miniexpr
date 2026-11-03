@@ -4471,11 +4471,15 @@ static void read_identifier_token(state* s) {
     case ME_FUNCTION6:
     case ME_FUNCTION7:
         s->type = var->type;
-        /* The legacy token enum aliases pure FUNCTION0 (40) with logical-not.
-         * Menudet constants retain function identity without that token flag;
-         * full-DSL parsing is intentionally unchanged. */
-        if (dsl_menudet_typed_profile(s->semantic_profile) &&
-            TYPE_MASK(var->type) == ME_FUNCTION0) s->type = ME_FUNCTION0;
+        /* The token enum aliases pure FUNCTION0 (40: pi, e) with logical-not,
+         * so the parser read `pi` as `not` wherever `not` may start an operand
+         * ((pi + x) was 0, copysign(pi, x) did not parse). The token carries
+         * the bare FUNCTION0 type, and base() makes a full-language constant
+         * pure again (so it folds); menudet constants stay calls. */
+        if (TYPE_MASK(var->type) == ME_FUNCTION0) {
+            s->type = ME_FUNCTION0;
+            s->function0_pure = IS_PURE(var->type) && !dsl_menudet_typed_profile(s->semantic_profile);
+        }
         s->function = var->address;
         s->dtype = var->dtype;
         s->itemsize = 0;
@@ -4775,7 +4779,7 @@ static me_expr* base(state* s) {
         switch (TYPE_MASK(s->type)) {
         case ME_FUNCTION0:
         case ME_CLOSURE0:
-            ret = new_expr(s->type, 0);
+            ret = new_expr(TYPE_MASK(s->type) == ME_FUNCTION0 && s->function0_pure ? s->type | ME_FLAG_PURE : s->type, 0);
             CHECK_NULL(ret);
 
             ret->function = s->function;

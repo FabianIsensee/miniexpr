@@ -22,6 +22,8 @@ typedef struct {
     double expected[N];
 } precedence_case;
 
+#define PI 3.14159265358979323846
+
 static const precedence_case cases[] = {
     /* Unary operators bind looser than "**" on their left ... */
     {ME_INT64, "a", "-a ** 2", {-9.0, -1.0, 0.0, -1.0, -4.0, -9.0}},
@@ -82,6 +84,11 @@ static const precedence_case cases[] = {
     {ME_FLOAT64, "abc", "a - b - c", {-6.0, -6.0, -1.0, -4.0, 1.0, 0.0}},
     {ME_INT64, "ab", "-a * b", {6.0, 3.0, 0.0, -2.0, 0.0, -3.0}},
     {ME_FLOAT64, "ab", "-a * b", {6.0, 3.0, -0.0, -2.0, -0.0, -3.0}},
+    /* pi and e are not read as `not` where an operand may start with one. */
+    {ME_FLOAT64, "a", "(pi + a)", {PI - 3.0, PI - 1.0, PI, PI + 1.0, PI + 2.0, PI + 3.0}},
+    {ME_FLOAT64, "a", "pi * a", {PI * -3.0, -PI, 0.0, PI, PI * 2.0, PI * 3.0}},
+    {ME_FLOAT64, "a", "copysign(pi, a)", {-PI, -PI, PI, PI, PI, PI}},
+    {ME_FLOAT64, "a", "not a > pi * 0.5", {1.0, 1.0, 1.0, 1.0, 0.0, 0.0}},
 };
 
 static double output_value(me_dtype dtype, const void *out, int i) {

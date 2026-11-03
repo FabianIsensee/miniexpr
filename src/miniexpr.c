@@ -1600,6 +1600,7 @@ int private_compile_profile_ex(const char* expression, const me_variable* variab
 
     state s;
     s.semantic_profile = profile;
+    s.function0_pure = false;
     s.start = s.next = expression;
     s.lookup = vars_copy ? vars_copy : variables;
     s.lookup_len = var_count;
