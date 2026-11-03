@@ -2822,6 +2822,30 @@ static bool is_logical_function(const void* func) {
         func == (void*)logical_not || func == (void*)logical_xor;
 }
 
+/* x != 0: the truth value NumPy takes of a non-bool where() condition. */
+me_expr* new_nonzero_test(me_expr* x) {
+    me_expr* zero = new_expr(ME_CONSTANT, 0);
+    if (!zero) return NULL;
+    zero->value = 0.0;
+    zero->dtype = x->dtype;
+    me_expr* test = NEW_EXPR(ME_FUNCTION2 | ME_FLAG_PURE, x, zero);
+    if (!test) {
+        me_free(zero);
+        return NULL;
+    }
+    test->function = cmp_ne;
+    test->dtype = ME_BOOL;
+    return test;
+}
+
+bool is_logical_node(const me_expr* n) {
+    return n && IS_FUNCTION(n->type) && is_logical_function(n->function);
+}
+
+bool is_conversion_node(const me_expr* n) {
+    return n && IS_FUNCTION(n->type) && ARITY(n->type) == 1 && n->function == NULL;
+}
+
 typedef void (*convert_func_t)(const void*, void*, int);
 static convert_func_t get_convert_func(me_dtype from, me_dtype to);
 
@@ -2999,16 +3023,24 @@ static bool compare_to_bool_output(const me_expr* n, me_dtype eval_type,
 
     const void* func = n->function;
 
+/* One loop per operand kind, so that each vectorizes whether or not the
+ * compiler unswitches a per-element constant test (that depends on how much
+ * of the caller gets inlined). */
 #define CMP_LOOP_OP(TYPE, OP) \
     do { \
         const TYPE* lptr = (const TYPE*)ldata; \
         const TYPE* rptr = (const TYPE*)rdata; \
-        TYPE lc = (TYPE)lval; \
-        TYPE rc = (TYPE)rval; \
-        for (int i = 0; i < nitems; i++) { \
-            TYPE a = lconst ? lc : lptr[i]; \
-            TYPE b = rconst ? rc : rptr[i]; \
-            out[i] = (a OP b); \
+        const TYPE lc = (TYPE)lval; \
+        const TYPE rc = (TYPE)rval; \
+        if (lconst && rconst) { \
+            const bool v = (lc OP rc); \
+            for (int i = 0; i < nitems; i++) out[i] = v; \
+        } else if (rconst) { \
+            for (int i = 0; i < nitems; i++) out[i] = (lptr[i] OP rc); \
+        } else if (lconst) { \
+            for (int i = 0; i < nitems; i++) out[i] = (lc OP rptr[i]); \
+        } else { \
+            for (int i = 0; i < nitems; i++) out[i] = (lptr[i] OP rptr[i]); \
         } \
     } while (0)
 
@@ -4033,6 +4065,26 @@ bool me_menudet_string_execute(const me_expr *n, const void *const *values, void
 
 static bool eval_bool_expr(me_expr* n) {
     if (!n || !n->output) return false;
+
+    /* A bool-to-bool conversion node is only a type boundary (the typing
+     * pass puts one around each comparison under and/or/not): evaluate its
+     * source straight into this output. */
+    if (is_conversion_node(n) && n->dtype == ME_BOOL) {
+        me_expr* source = (me_expr*)n->parameters[0];
+        if (!source || source->dtype != ME_BOOL) return false;
+        if (source->type == ME_VARIABLE) {
+            memcpy(n->output, source->bound, (size_t)n->nitems * sizeof(bool));
+            return true;
+        }
+        void* saved_output = source->output;
+        const int saved_nitems = source->nitems;
+        source->output = n->output;
+        source->nitems = n->nitems;
+        const bool ok = eval_bool_expr(source);
+        source->output = saved_output;
+        source->nitems = saved_nitems;
+        return ok;
+    }
 
     if (n->type == ME_CONSTANT) {
         bool val = (bool)(n->value != 0.0);
@@ -6443,7 +6495,8 @@ static void me_eval_##SUFFIX(const me_expr *n) { \
             if (is_conv_node) { \
                 /* Conversion node: evaluate child with native dtype, then convert */ \
                 me_expr *source = (me_expr*)n->parameters[0]; \
-                me_dtype source_dtype = n->input_dtype; \
+                /* private_eval() writes the source in its own dtype. */ \
+                me_dtype source_dtype = source->dtype; \
                 size_t source_size = dtype_size(source_dtype); \
                 \
                 if (source->type != ME_CONSTANT && source->type != ME_VARIABLE) { \
@@ -6464,6 +6517,10 @@ static void me_eval_##SUFFIX(const me_expr *n) { \
                     convert_func_t conv = get_convert_func(source_dtype, ME_EVAL_DTYPE_##SUFFIX); \
                     if (conv) { \
                         conv(src_data, output, n->nitems); \
+                    } \
+                    else if (dtype_size(source_dtype) == sizeof(TYPE)) { \
+                        /* Same dtype (the node is only a type boundary). */ \
+                        memcpy(output, src_data, (size_t)n->nitems * sizeof(TYPE)); \
                     } \
                 } \
                 break; \
@@ -9727,9 +9784,13 @@ void optimize(me_expr* n) {
         }
         if (known) {
             const double value = me_eval_scalar(n);
+            /* Type the folded constant from its operands (-1.5 like 1.5), not
+             * by the call's provisional parse-time dtype. */
+            const me_dtype dtype = infer_output_type(n);
             me_free_parameters(n);
             n->type = ME_CONSTANT;
             n->value = value;
+            n->dtype = dtype;
         }
     }
 }

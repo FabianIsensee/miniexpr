@@ -142,6 +142,10 @@ void me_free_parameters(me_expr* n);
 
 bool is_reduction_node(const me_expr* n);
 bool is_comparison_node(const me_expr* n);
+bool is_logical_node(const me_expr* n);
+me_expr* new_nonzero_test(me_expr* x);
+/* Internal conversion marker created by apply_type_promotion(): arity 1, no function. */
+bool is_conversion_node(const me_expr* n);
 const char* me_comparison_operator(const me_expr* n);
 /* Internal operator spelling for typed DSL arithmetic lowering, NULL otherwise. */
 const char* me_arithmetic_operator(const me_expr* n);

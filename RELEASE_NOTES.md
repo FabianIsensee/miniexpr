@@ -4,6 +4,11 @@ Release notes for miniexpr
 Changes from 0.2.0 to 0.2.1
 ===========================
 
+* Expression trees are retyped after parsing and optimization, so mixed-dtype
+  expressions no longer convert values between buffers of the wrong dtype
+  (wrong results and heap overflows such as int16 `(i + i) * abs(i)`), and a
+  non-bool `where()` condition selects by its truth.
+
 * Menudet JIT emits same-width typed integer bitwise operations directly instead
   of calling scalar interpreter helpers. Scalar integer/Boolean local declarations no
   longer use volatile rounding barriers, reducing stack traffic in hash kernels.
