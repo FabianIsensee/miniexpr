@@ -4,6 +4,13 @@ Release notes for miniexpr
 Changes from 0.2.0 to 0.2.1
 ===========================
 
+* Expression operator precedence follows Python. Behaviour change: `-x ** 2` is
+  now `-(x ** 2)` (was `(-x) ** 2`), `~x ** 2` is `~(x ** 2)`, `a ** b ** c` is
+  `a ** (b ** c)` (was `(a ** b) ** c`), and in plain expressions `a < b < c` is
+  `(a < b) and (b < c)` (was `(a < b) < c`; DSL kernels already chained). The
+  `ME_POW_FROM_RIGHT` source option is removed. Write `(-x) ** 2` to keep the old
+  meaning.
+
 * Menudet JIT emits same-width typed integer bitwise operations directly instead
   of calling scalar interpreter helpers. Scalar integer/Boolean local declarations no
   longer use volatile rounding barriers, reducing stack traffic in hash kernels.

@@ -36,10 +36,8 @@
 
 /* COMPILE TIME OPTIONS */
 
-/* Exponentiation associativity:
-For a**b**c = (a**b)**c and -a**b = (-a)**b do nothing.
-For a**b**c = a**(b**c) and -a**b = -(a**b) uncomment the next line.*/
-/* #define ME_POW_FROM_RIGHT */
+/* Exponentiation follows Python: a**b**c = a**(b**c) and -a**b = -(a**b).
+The former ME_POW_FROM_RIGHT option is gone (see the grammar above list()). */
 
 /* Logarithms
 For log = natural log do nothing (NumPy compatible)
@@ -4620,11 +4618,42 @@ void next_token(state* s) {
 }
 
 
+/* Expression grammar, loosest to tightest binding. Levels and associativity
+ * follow Python's operator precedence (python-blosc2 renders expressions
+ * without the parentheses Python does not need):
+ *
+ *   <list>        = <logical_or> {"," <logical_or>}
+ *   <logical_or>  = <logical_and> {("or" | "||") <logical_and>}
+ *   <logical_and> = <logical_not> {("and" | "&&") <logical_not>}
+ *   <logical_not> = ("not" | "!") <logical_not> | <comparison>
+ *   <comparison>  = <bitwise_or> {("<" | ">" | "<=" | ">=" | "==" | "!=") <bitwise_or>}
+ *   <bitwise_or>  = <bitwise_xor> {"|" <bitwise_xor>}
+ *   <bitwise_xor> = <bitwise_and> {"^" <bitwise_and>}
+ *   <bitwise_and> = <shift_expr> {"&" <shift_expr>}
+ *   <shift_expr>  = <expr> {("<<" | ">>") <expr>}
+ *   <expr>        = <term> {("+" | "-") <term>}
+ *   <term>        = <factor> {("*" | "/" | "%" | "//") <factor>}
+ *   <factor>      = ("-" | "+" | "~") <factor> | <power>
+ *   <power>       = <base> ["**" <factor>]
+ *   <base>        = constant | variable | function call | "(" <list> ")"
+ *
+ * As in Python, "**" is right-associative and binds tighter than a unary
+ * operator on its left, but not on its right: -x ** 2 is -(x ** 2),
+ * a ** b ** c is a ** (b ** c) and 2 ** -1 is 2 ** (-1). Comparisons chain:
+ * a < b < c is (a < b) and (b < c). Earlier versions kept tinyexpr's rules
+ * here ((-x) ** 2, (a ** b) ** c and (a < b) < c). */
+
 me_expr* list(state* s);
 
 static me_expr* expr(state* s);
 
 static me_expr* power(state* s);
+
+static me_expr* factor(state* s);
+
+static me_expr* unary(state* s, bool with_power);
+
+static me_expr* clone_expr(const me_expr* src);
 
 static me_expr* shift_expr(state* s);
 
@@ -4644,7 +4673,7 @@ static me_expr* logical_or_expr(state* s);
 
 
 static me_expr* base(state* s) {
-    /* <base>      =    <constant> | <variable> | <function-0> {"(" ")"} | <function-1> <power> | <function-X> "(" <expr> {"," <expr>} ")" | "(" <list> ")" */
+    /* <base>      =    <constant> | <variable> | <function-0> {"(" ")"} | <function-1> {("-" | "+" | "~")} <base> | <function-X> "(" <logical_or> {"," <logical_or>} ")" | "(" <list> ")" */
     me_expr* ret = NULL;
     int arity;
 
@@ -4782,7 +4811,8 @@ static me_expr* base(state* s) {
             }
             if (IS_CLOSURE(s->type)) ret->parameters[1] = s->context;
             next_token(s);
-            ret->parameters[0] = power(s);
+            /* The argument stops before "**": sin(x) ** 2 is (sin(x)) ** 2. */
+            ret->parameters[0] = unary(s, false);
             CHECK_NULL(ret->parameters[0], me_free(ret));
             break;
 
@@ -4818,8 +4848,9 @@ static me_expr* base(state* s) {
                 int i;
                 for (i = 0; i < arity; i++) {
                     next_token(s);
-                    /* Allow full comparison expressions inside multi-arg function calls. */
-                    ret->parameters[i] = comparison(s);
+                    /* An argument is a full expression up to the next comma,
+                     * as in Python: where(a > 0 and not b, x, y). */
+                    ret->parameters[i] = logical_or_expr(s);
                     CHECK_NULL(ret->parameters[i], me_free(ret));
 
                     if (s->type != TOK_SEP) {
@@ -4863,12 +4894,13 @@ static me_expr* base(state* s) {
 }
 
 
-static me_expr* power(state* s) {
-    /* <power>     =    {("-" | "+" | "~")} <base> */
+static me_expr* unary(state* s, bool with_power) {
+    /* {("-" | "+" | "~")} <power>, or {("-" | "+" | "~")} <base> for the
+     * unparenthesized argument of a one-argument function. */
     if (s->type == TOK_INFIX && (s->function == add || s->function == sub)) {
         me_fun2 t = (me_fun2)s->function;
         next_token(s);
-        me_expr* inner = power(s);
+        me_expr* inner = unary(s, with_power);
         CHECK_NULL(inner);
 
         if (t == add) {
@@ -4894,7 +4926,7 @@ static me_expr* power(state* s) {
 
     if (s->type == TOK_BITWISE && s->function == bit_not) {
         next_token(s);
-        me_expr* inner = power(s);
+        me_expr* inner = unary(s, with_power);
         CHECK_NULL(inner);
 
         me_expr* ret = NEW_EXPR(ME_FUNCTION1 | ME_FLAG_PURE, inner);
@@ -4909,41 +4941,21 @@ static me_expr* power(state* s) {
         return ret;
     }
 
-    return base(s);
+    return with_power ? power(s) : base(s);
 }
 
-#ifdef ME_POW_FROM_RIGHT
-static me_expr* factor(state* s) {
-    /* <factor>    =    <power> {"**" <factor>}  (right associative) */
-    me_expr* ret = power(s);
+
+static me_expr* power(state* s) {
+    /* <power>     =    <base> ["**" <factor>] */
+    me_expr* ret = base(s);
     CHECK_NULL(ret);
 
     if (s->type == TOK_POW) {
-        me_fun2 t = s->function;
-        next_token(s);
-        me_expr* f = factor(s); /* Right associative: recurse */
-        CHECK_NULL(f, me_free(ret));
-
-        me_expr* prev = ret;
-        ret = NEW_EXPR(ME_FUNCTION2 | ME_FLAG_PURE, ret, f);
-        CHECK_NULL(ret, me_free(f), me_free(prev));
-
-        ret->function = t;
-        apply_type_promotion(ret);
-    }
-
-    return ret;
-}
-#else
-static me_expr* factor(state* s) {
-    /* <factor>    =    <power> {"**" <power>}  (left associative) */
-    me_expr* ret = power(s);
-    CHECK_NULL(ret);
-
-    while (s->type == TOK_POW) {
         me_fun2 t = (me_fun2)s->function;
         next_token(s);
-        me_expr* f = power(s);
+        /* The exponent is a <factor>, as in Python: it may be signed
+         * (2 ** -1) and recursing makes "**" right-associative. */
+        me_expr* f = factor(s);
         CHECK_NULL(f, me_free(ret));
 
         me_expr* prev = ret;
@@ -4956,7 +4968,13 @@ static me_expr* factor(state* s) {
 
     return ret;
 }
-#endif
+
+
+static me_expr* factor(state* s) {
+    /* <factor>    =    ("-" | "+" | "~") <factor> | <power>
+     * A unary operator applies to the whole power: -x ** 2 is -(x ** 2). */
+    return unary(s, true);
+}
 
 
 static me_expr* term(state* s) {
@@ -5132,24 +5150,50 @@ static me_expr* bitwise_or(state* s) {
 
 
 static me_expr* comparison(state* s) {
-    /* <comparison> =    <bitwise_or> {("<" | ">" | "<=" | ">=" | "==" | "!=") <bitwise_or>} */
+    /* <comparison> =    <bitwise_or> {("<" | ">" | "<=" | ">=" | "==" | "!=") <bitwise_or>}
+     * A chain means what it means in Python, element-wise: a < b <= c is
+     * (a < b) and (b <= c). The shared operand b is parsed once and cloned
+     * into the next link (expressions are pure, so evaluating it twice gives
+     * the same values). */
     me_expr* ret = bitwise_or(s);
     CHECK_NULL(ret);
+    /* Left operand of the next link when chaining: a clone of the previous
+     * right operand, owned here until it is linked. */
+    me_expr* clone = NULL;
 
     while (s->type == TOK_COMPARE) {
         me_fun2 t = (me_fun2)s->function;
         next_token(s);
         me_expr* e = bitwise_or(s);
-        CHECK_NULL(e, me_free(ret));
+        CHECK_NULL(e, me_free(clone), me_free(ret));
 
-        me_expr* prev = ret;
-        ret = NEW_EXPR(ME_FUNCTION2 | ME_FLAG_PURE, ret, e);
-        CHECK_NULL(ret, me_free(e), me_free(prev));
+        me_expr* next_clone = NULL;
+        if (s->type == TOK_COMPARE) {
+            next_clone = clone_expr(e);
+            CHECK_NULL(next_clone, me_free(e), me_free(clone), me_free(ret));
+        }
 
-        ret->function = (void*)t;
-        apply_type_promotion(ret);
+        me_expr* link = NEW_EXPR(ME_FUNCTION2 | ME_FLAG_PURE, clone ? clone : ret, e);
+        CHECK_NULL(link, me_free(next_clone), me_free(e), me_free(clone), me_free(ret));
+
+        link->function = (void*)t;
+        apply_type_promotion(link);
         /* Comparisons always return bool */
-        ret->dtype = ME_BOOL;
+        link->dtype = ME_BOOL;
+
+        if (clone) {
+            me_expr* prev = ret;
+            ret = NEW_EXPR(ME_FUNCTION2 | ME_FLAG_PURE, prev, link);
+            CHECK_NULL(ret, me_free(next_clone), me_free(link), me_free(prev));
+
+            ret->function = logical_and;
+            apply_type_promotion(ret);
+            ret->dtype = ME_BOOL;
+        }
+        else {
+            ret = link;
+        }
+        clone = next_clone;
     }
 
     return ret;
