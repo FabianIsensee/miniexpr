@@ -189,8 +189,50 @@ static int check_values(void) {
     return failures;
 }
 
+/* Nesting deeper than the grouping parser takes keeps the kernel on the
+ * interpreter instead of compiling it with C's grouping. */
+static int check_deep_nesting(void) {
+    static const int64_t a[N] = {-3, -1, 0, 1, 2, 3};
+    static const int64_t b[N] = {2, 3, 1, 2, 0, 1};
+    static char source[2048];
+    strcpy(source, "def kernel(a, b):\n    return ");
+    for (int i = 0; i < 301; i++) strcat(source, "not ");
+    strcat(source, "a == b\n");
+    me_variable vars[] = {{.name = "a", .dtype = ME_INT64}, {.name = "b", .dtype = ME_INT64}};
+    const void *inputs[] = {a, b};
+    int64_t shape[] = {N};
+    int32_t chunks[] = {N}, blocks[] = {N};
+    int failures = 0;
+    for (int jit = 1; jit <= 2; jit++) {
+        int error = 0;
+        me_expr *compiled = NULL;
+        int64_t out[N];
+        if (me_compile_nd_jit(source, vars, 2, ME_INT64, 1, shape, chunks, blocks, jit, &error, &compiled) !=
+                ME_COMPILE_SUCCESS ||
+            !compiled || me_eval_nd(compiled, inputs, 2, out, N, 0, 0, NULL) != ME_EVAL_SUCCESS) {
+            printf("FAIL deep not chain (jit_mode %d)\n", jit);
+            me_free(compiled);
+            failures++;
+            continue;
+        }
+        if (me_expr_has_jit_kernel(compiled)) {
+            printf("FAIL deep not chain was JIT-compiled\n");
+            failures++;
+        }
+        for (int i = 0; i < N; i++) {
+            if (out[i] != (a[i] != b[i])) {
+                printf("FAIL deep not chain (jit_mode %d) [%d] = %lld\n", jit, i, (long long)out[i]);
+                failures++;
+                break;
+            }
+        }
+        me_free(compiled);
+    }
+    return failures;
+}
+
 int main(void) {
-    int failures = check_ir_text() + check_values();
+    int failures = check_ir_text() + check_values() + check_deep_nesting();
     if (failures) {
         printf("%d grouping checks failed\n", failures);
         return 1;

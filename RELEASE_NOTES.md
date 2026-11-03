@@ -13,8 +13,9 @@ Changes from 0.2.0 to 0.2.1
 
 * DSL JIT kernels group `not` and `&`/`^`/`|` around comparisons as Python and
   the interpreter do. Generated C used C's precedence, so `x & 1 == 0` computed
-  `x & (1 == 0)` and `not a == b` computed `(not a) == b`. Comparison chains
-  accept `~` operands (`0 < ~x < 5` was rejected).
+  `x & (1 == 0)` and `not a == b` computed `(not a) == b`, and `--x` was C's
+  pre-decrement (`x - 1`). Comparison chains accept `~` operands
+  (`0 < ~x < 5` was rejected).
 
 * Menudet JIT emits same-width typed integer bitwise operations directly instead
   of calling scalar interpreter helpers. Scalar integer/Boolean local declarations no

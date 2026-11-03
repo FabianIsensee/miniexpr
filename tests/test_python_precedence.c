@@ -154,7 +154,8 @@ static int check_case(const precedence_case *tc, int mode) {
     for (int i = 0; i < N; i++) {
         double got = output_value(out_dtype, &out, i);
         double want = tc->expected[i];
-        if (!(got == want || (isnan(got) && isnan(want)))) {
+        /* Also the sign of a zero result (-a ** 2 of 0 is -0.0). */
+        if (!((got == want && signbit(got) == signbit(want)) || (isnan(got) && isnan(want)))) {
             printf("FAIL %s %s: '%s' at a=%g b=%g c=%g: got %.17g, expected %.17g\n", mode_name,
                    dtype_name, tc->expr, A[i], B[i], C[i], got, want);
             return 1;

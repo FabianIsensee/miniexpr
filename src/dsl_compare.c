@@ -752,8 +752,10 @@ static char *dsl_c_grouping_raw(const char *text) {
     chain_node *root = chain_parse_expr(&parser, 0);
     char *out = NULL;
     if (parser.failed || !root || *parser.token) {
-        /* Not this parser's syntax; the compiler reports real errors. */
-        out = chain_copy(text, text + len);
+        /* Not this parser's syntax (or nested too deeply): C's grouping could
+         * differ from Python's, so give no text and keep the kernel off the
+         * JIT; the compiler reports real errors. */
+        out = NULL;
     } else {
         int *opens = calloc(len + 1, sizeof(*opens));
         int *closes = calloc(len + 1, sizeof(*closes));
