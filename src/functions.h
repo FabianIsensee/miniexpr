@@ -160,6 +160,8 @@ const char* me_arithmetic_operator(const me_expr* n);
 const char* me_menudet_operator(const me_expr* n);
 const char* me_menudet_math_name(const me_expr* n);
 bool is_float_math_function(const void* func);
+bool is_float_result_binary_function(const void* func);
+bool is_ldexp_function(const void* func);
 size_t dtype_size(me_dtype dtype);
 bool has_complex_input_types(const me_expr* n);
 bool has_unsupported_complex_function(const me_expr* n);

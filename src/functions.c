@@ -623,6 +623,21 @@ static double all_reduce(double x) { return x * (1.0 + all_salt); }
 double min_reduce(double x) { return x + min_salt; }
 double max_reduce(double x) { return x - max_salt; }
 
+/* Binary operations whose result is floating point for integer and bool
+ * operands, as in NumPy: true division and the real two-argument functions. */
+bool is_ldexp_function(const void* func) {
+    return func == (void*)ldexp_wrapper;
+}
+
+bool is_float_result_binary_function(const void* func) {
+    return func == (void*)divide ||
+        func == (void*)atan2 ||
+        func == (void*)copysign ||
+        func == (void*)hypot ||
+        func == (void*)logaddexp ||
+        func == (void*)nextafter;
+}
+
 static float reduce_min_float32_nan_safe(const float* data, int nitems) {
     if (nitems <= 0) return INFINITY;
 #if defined(__AVX__) || defined(__AVX2__)
@@ -9820,8 +9835,14 @@ void optimize(me_expr* n) {
         if (known) {
             const double value = me_eval_scalar(n);
             /* Type the folded constant from its operands (-1.5 like 1.5), not
-             * by the call's provisional parse-time dtype. */
-            const me_dtype dtype = infer_output_type(n);
+             * by the call's provisional parse-time dtype; true division and
+             * the float functions of integer constants are float64 (5 / 2). */
+            me_dtype dtype = infer_output_type(n);
+            if (IS_FUNCTION(n->type) && ARITY(n->type) == 2 &&
+                (is_float_result_binary_function(n->function) || is_ldexp_function(n->function)) &&
+                !is_float_dtype(dtype) && !is_complex_dtype(dtype)) {
+                dtype = ME_FLOAT64;
+            }
             me_free_parameters(n);
             n->type = ME_CONSTANT;
             n->value = value;

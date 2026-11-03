@@ -1477,6 +1477,15 @@ static me_dtype retype_value_dtype(const me_expr* n) {
     for (int i = 0; i < arity; i++) {
         result = promote_types(result, ((const me_expr*)n->parameters[i])->dtype);
     }
+    /* int / int is float64 (and so is bool / bool), like hypot(int, int). */
+    if (IS_FUNCTION(n->type) && arity == 2 && is_float_result_binary_function(n->function)) {
+        return promote_float_math_result(result);
+    }
+    /* ldexp(x, n) takes the float dtype of x alone (ldexp(float32, int64) is
+     * float32), as in NumPy. */
+    if (IS_FUNCTION(n->type) && arity == 2 && is_ldexp_function(n->function)) {
+        return promote_float_math_result(arg0->dtype);
+    }
     /* Arithmetic of bools must not compute in bool (True + True would store
      * 2 in a bool): DSL kernels follow Python (int64, True + True == 2),
      * expressions keep int8 as before. */
