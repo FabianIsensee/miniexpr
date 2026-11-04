@@ -1157,6 +1157,14 @@ me_dtype infer_result_type(const me_expr* n) {
                 result = promote_types(result, param_type);
             }
 
+            /* Comparisons may compute in this dtype but yield bool. Do not
+             * infer a bool result for binary floating math from those bool
+             * outputs when revisiting a typed subtree (e.g. sum(hypot(...))).
+             * Float16 results are unsupported; bool/integer math uses float64. */
+            if (IS_FUNCTION(n->type) && arity == 2 &&
+                (is_float_result_binary_function(n->function) || is_ldexp_function(n->function))) {
+                return promote_float_math_result(result);
+            }
             return result;
         }
     }
@@ -1262,6 +1270,14 @@ me_dtype infer_output_type(const me_expr* n) {
                 result = promote_types(result, param_type);
             }
 
+            /* Comparisons may compute in this dtype but yield bool. Do not
+             * infer a bool result for binary floating math from those bool
+             * outputs when revisiting a typed subtree (e.g. sum(hypot(...))).
+             * Float16 results are unsupported; bool/integer math uses float64. */
+            if (IS_FUNCTION(n->type) && arity == 2 &&
+                (is_float_result_binary_function(n->function) || is_ldexp_function(n->function))) {
+                return promote_float_math_result(result);
+            }
             return result;
         }
     }

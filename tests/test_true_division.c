@@ -124,7 +124,69 @@ done:
     free(b);
 }
 
+/* Comparisons can compute in float64 while yielding bool. Binary float
+ * math must retain its floating result when inference revisits the tree,
+ * including inside reductions. Float16 is unsupported, so use float64. */
+static void check_comparison_float_math(void) {
+    static const binary_case cases[] = {
+        {"(a > 0) / (b > 0)", ref_div},
+        {"hypot(a > 0, b > 0)", hypot},
+        {"atan2(a > 0, b > 0)", atan2},
+        {"nextafter(a > 0, b > 0)", nextafter},
+        {"copysign(a > 0, b > 0)", copysign},
+        {"logaddexp(a > 0, b > 0)", ref_logaddexp},
+        {"ldexp(a > 0, b > 0)", ref_ldexp},
+    };
+    double a[N], b[N];
+    for (int i = 0; i < N; i++) {
+        a[i] = i % 4 - 1;
+        b[i] = 1;
+    }
+    const void *ptrs[] = {a, b};
+    me_variable vars[] = {{"a", ME_FLOAT64}, {"b", ME_FLOAT64}};
+    for (size_t k = 0; k < sizeof(cases) / sizeof(cases[0]); k++) {
+        for (int arithmetic = 0; arithmetic < 2; arithmetic++) {
+            for (int reduction = 0; reduction < 2; reduction++) {
+                char expr[160];
+                snprintf(expr, sizeof(expr), "%s(%s)%s%s", reduction ? "sum(" : "",
+                         cases[k].expr, arithmetic ? " + 0.25" : "", reduction ? ")" : "");
+                for (int explicit_output = 0; explicit_output < 2; explicit_output++) {
+                    me_expr *e = NULL;
+                    int err = 0;
+                    me_dtype dtype = explicit_output ? ME_FLOAT64 : ME_AUTO;
+                    if (me_compile(expr, vars, 2, dtype, &err, &e) != ME_COMPILE_SUCCESS ||
+                        me_get_dtype(e) != ME_FLOAT64) {
+                        printf("  FAIL: '%s' output %d does not compile to float64\n", expr, dtype);
+                        failures++;
+                        me_free(e);
+                        continue;
+                    }
+                    double out[N];
+                    ME_EVAL_CHECK(e, ptrs, 2, out, N);
+                    double sum = 0;
+                    for (int i = 0; i < N; i++) {
+                        double want = cases[k].ref(a[i] > 0, b[i] > 0) + (arithmetic ? 0.25 : 0);
+                        sum += want;
+                        if (!reduction && !(out[i] == want || fabs(out[i] - want) <= 1e-14 * fabs(want))) {
+                            printf("  FAIL: '%s' output %d [%d] = %.17g, expected %.17g\n",
+                                   expr, dtype, i, out[i], want);
+                            failures++;
+                            break;
+                        }
+                    }
+                    if (reduction && !(fabs(out[0] - sum) <= 1e-12 * fabs(sum))) {
+                        printf("  FAIL: '%s' output %d = %.17g, expected %.17g\n", expr, dtype, out[0], sum);
+                        failures++;
+                    }
+                    me_free(e);
+                }
+            }
+        }
+    }
+}
+
 int main(void) {
+    check_comparison_float_math();
     static const me_dtype dtypes[] = {ME_BOOL, ME_INT8, ME_INT16, ME_INT32, ME_INT64,
                                       ME_UINT8, ME_UINT16, ME_UINT32, ME_UINT64};
     printf("Test: true division and float functions of integer/bool operands\n");
