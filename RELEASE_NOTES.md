@@ -20,7 +20,10 @@ Changes from 0.2.0 to 0.2.1
 * Behaviour change: true division and `atan2`, `copysign`, `hypot`,
   `logaddexp`, `nextafter` of integer or bool operands compute in float64, as
   in NumPy (int / int was computed in integer arithmetic, and bool / bool could
-  raise SIGFPE).
+  raise SIGFPE). Binary float functions retain their floating result when
+  their operands are bool comparisons, including inside reductions: for
+  float64 x = [0, 1, 5, 6], sum(hypot(x > 0, x > 0)) returns 3*sqrt(2)
+  instead of 3, with ME_AUTO or explicit float64 output.
 
 * Behaviour change: in expressions, bool + bool is logical or and bool * bool
   is logical and, as for NumPy bool arrays (they were added as int8, so
