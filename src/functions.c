@@ -634,12 +634,20 @@ bool is_square_function(const void* func) {
 }
 
 bool is_float_result_binary_function(const void* func) {
-    return func == (void*)divide ||
-        func == (void*)atan2 ||
-        func == (void*)copysign ||
-        func == (void*)hypot ||
-        func == (void*)logaddexp ||
-        func == (void*)nextafter;
+    if (func == (void*)divide || func == (void*)atan2 ||
+        func == (void*)copysign || func == (void*)hypot ||
+        func == (void*)logaddexp || func == (void*)nextafter) {
+        return true;
+    }
+    /* CRT inline/import aliases can have a different address from the one
+     * stored by builtin registration (notably on Windows). Use the same
+     * fallback as me_menudet_math_name() so typing follows the parsed call. */
+    const char* names[] = {"atan2", "copysign", "hypot", "nextafter"};
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        const me_variable* builtin = find_builtin(names[i], strlen(names[i]));
+        if (builtin && func == builtin->address) return true;
+    }
+    return false;
 }
 
 /* The `%` operator's function: fmod here, NumPy's remainder where `%` and
