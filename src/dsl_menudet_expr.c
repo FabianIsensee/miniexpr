@@ -80,6 +80,10 @@ static bool p_unsigned(me_dtype d) {
     return d == ME_UINT8 || d == ME_UINT16 || d == ME_UINT32 || d == ME_UINT64;
 }
 
+static bool p_integer(me_dtype d) {
+    return d == ME_INT8 || d == ME_INT16 || d == ME_INT32 || d == ME_INT64 || p_unsigned(d);
+}
+
 static bool p_float(me_dtype d) {
     return d == ME_FLOAT32 || d == ME_FLOAT64;
 }
@@ -2389,7 +2393,8 @@ int dsl_menudet_eval_expr(const me_expr *expr, const void *const *vars, int nvar
 #define P_BATCH_LANES 256
 typedef enum { P_BATCH_LEAF, P_BATCH_CAST, P_BATCH_NEG, P_BATCH_ADD,
     P_BATCH_SUB, P_BATCH_MUL, P_BATCH_DIV, P_BATCH_MATH, P_BATCH_COMPARE,
-    P_BATCH_POWER, P_BATCH_POWER_CHAIN, P_BATCH_MASK, P_BATCH_SELECT } p_batch_op;
+    P_BATCH_POWER, P_BATCH_POWER_CHAIN, P_BATCH_MASK, P_BATCH_SELECT, P_BATCH_MOD,
+    P_BATCH_AND, P_BATCH_OR, P_BATCH_XOR } p_batch_op;
 typedef struct {
     const me_expr *expr;
     p_batch_op op;
@@ -2435,6 +2440,41 @@ static int p_batch_append(p_batch_program *program, const p_batch_instruction *i
     return result;
 }
 
+/* Integer conversions are lane-local: widening is a plain extension, while
+ * narrowing follows the interpreter's modular conversion. Captured integer
+ * literals arrive as uniform int64 weak scalars, so narrowing must stay
+ * batchable. Float destinations keep the existing bridge; float/integer mixes
+ * retain scalar semantics. */
+static bool p_batch_integer_conversion(me_dtype from, me_dtype to) {
+    return p_integer(from) && p_integer(to);
+}
+
+/* Eagerly evaluating an inactive branch is observationally identical only when
+ * it cannot raise floating-point exceptions: plain lanes, value-preserving
+ * integer conversions, and integer bitwise/arithmetic. Float math keeps the
+ * contiguous-run guards so inactive lanes never touch the FP status flags. */
+static bool p_batch_eager_safe(const me_expr *n) {
+    if (!n) return false;
+    int kind = TYPE_MASK(n->type);
+    if (kind == ME_VARIABLE || kind == ME_CONSTANT) return true;
+    if (!IS_FUNCTION(n->type) || is_reduction_node(n)) return false;
+    if (n->dtype != ME_BOOL && !p_integer(n->dtype)) return false;
+    if (!n->function) {
+        const me_expr *arg = n->parameters[0];
+        return ARITY(n->type) == 1 && arg && (arg->dtype == ME_BOOL || p_integer(arg->dtype));
+    }
+    const char *op = me_menudet_operator(n);
+    if (!op) return false;
+    int arity = ARITY(n->type);
+    bool flag_neutral =
+        (arity == 2 && (!strcmp(op,"&") || !strcmp(op,"|") || !strcmp(op,"^") ||
+                        !strcmp(op,"+") || !strcmp(op,"-") || !strcmp(op,"*"))) ||
+        (arity == 1 && !strcmp(op,"-"));
+    if (!flag_neutral) return false;
+    for (int i = 0; i < arity; i++) if (!p_batch_eager_safe(n->parameters[i])) return false;
+    return true;
+}
+
 static int p_batch_build(p_batch_program *program, const me_expr *n,
     p_eval_context *ctx, int depth, int guard) {
     if (!n || depth > 32 || program->count == P_BATCH_NODES || dtype_size(n->dtype) > sizeof(double _Complex)) return -1;
@@ -2476,10 +2516,14 @@ static int p_batch_build(p_batch_program *program, const me_expr *n,
         bool floating=p_float(n->dtype);
         bool is_complex=p_complex(n->dtype);
         bool comparison=is_comparison_node(n);
-        if (!comparison && n->dtype == ME_BOOL) return -1;
-        if (!comparison && !floating && !is_complex && (!p_numpy(n) || p_weak(n))) return -1;
         int arity=ARITY(n->type);
         const char *selection = me_menudet_operator(n);
+        /* Boolean and integral bitwise operators are lane-local. Other boolean
+         * results (predicates, reductions) retain scalar evaluation. */
+        bool bitwise = arity == 2 && selection &&
+            (!strcmp(selection,"&") || !strcmp(selection,"|") || !strcmp(selection,"^"));
+        if (!comparison && n->dtype == ME_BOOL && !bitwise) return -1;
+        if (!comparison && !floating && !is_complex && (!p_numpy(n) || p_weak(n))) return -1;
         if (arity == 3 && selection && !strcmp(selection, "where")) {
             const me_expr *condition = n->parameters[0];
             const me_expr *yes = n->parameters[1], *no = n->parameters[2];
@@ -2487,12 +2531,17 @@ static int p_batch_build(p_batch_program *program, const me_expr *n,
                 yes->dtype != n->dtype || no->dtype != n->dtype) return -1;
             instruction.third = p_batch_build(program, condition, ctx, depth+1, guard);
             if (instruction.third < 0) return -1;
-            p_batch_instruction mask = {.expr=condition,.op=P_BATCH_MASK,
-                .left=instruction.third,.right=guard,.third=-1,.guard=-1,.mask_truth=true};
-            int yes_guard = p_batch_append(program, &mask);
-            mask.mask_truth = false;
-            int no_guard = p_batch_append(program, &mask);
-            if (yes_guard < 0 || no_guard < 0) return -1;
+            /* Flag-neutral branches may run on every lane: the select still
+             * picks the active one, so inactive lanes cannot be observed. */
+            int yes_guard = -1, no_guard = -1;
+            if (!p_batch_eager_safe(yes) || !p_batch_eager_safe(no)) {
+                p_batch_instruction mask = {.expr=condition,.op=P_BATCH_MASK,
+                    .left=instruction.third,.right=guard,.third=-1,.guard=-1,.mask_truth=true};
+                yes_guard = p_batch_append(program, &mask);
+                mask.mask_truth = false;
+                no_guard = p_batch_append(program, &mask);
+                if (yes_guard < 0 || no_guard < 0) return -1;
+            }
             instruction.left = p_batch_build(program, yes, ctx, depth+1, yes_guard);
             instruction.right = p_batch_build(program, no, ctx, depth+1, no_guard);
             if (instruction.left < 0 || instruction.right < 0) return -1;
@@ -2508,7 +2557,8 @@ static int p_batch_build(p_batch_program *program, const me_expr *n,
                 left->dtype != ((const me_expr *)n->parameters[1])->dtype) return -1;
             instruction.op=P_BATCH_COMPARE;
         } else if (!n->function && arity == 1 && p_numeric(left->dtype) &&
-            (is_complex || (floating && !p_complex(left->dtype)))) instruction.op=P_BATCH_CAST;
+            (is_complex || (floating && !p_complex(left->dtype)) ||
+             p_batch_integer_conversion(left->dtype, n->dtype))) instruction.op=P_BATCH_CAST;
         else {
             const char *op=me_menudet_operator(n);
             const char *name=op ? NULL : me_menudet_math_name(n);
@@ -2533,8 +2583,13 @@ static int p_batch_build(p_batch_program *program, const me_expr *n,
                 instruction.op=P_BATCH_NEG;
             else if (op && arity == 2 && left->dtype == n->dtype &&
                      ((const me_expr *)n->parameters[1])->dtype == n->dtype) {
+                /* Strong NumPy int32 remainder is total, unlike checked integer
+                 * division; other remainder domains retain scalar evaluation. */
                 instruction.op=!strcmp(op,"+") ? P_BATCH_ADD : !strcmp(op,"-") ? P_BATCH_SUB :
-                    !strcmp(op,"*") ? P_BATCH_MUL : !strcmp(op,"/") ? P_BATCH_DIV : P_BATCH_LEAF;
+                    !strcmp(op,"*") ? P_BATCH_MUL : !strcmp(op,"/") ? P_BATCH_DIV :
+                    !strcmp(op,"%") && n->dtype == ME_INT32 ? P_BATCH_MOD :
+                    !strcmp(op,"&") ? P_BATCH_AND : !strcmp(op,"|") ? P_BATCH_OR :
+                    !strcmp(op,"^") ? P_BATCH_XOR : P_BATCH_LEAF;
                 if (instruction.op == P_BATCH_LEAF || (!floating && instruction.op == P_BATCH_DIV)) return -1;
             } else if (floating && arity == 1 && left->dtype == n->dtype &&
                        (instruction.math=dsl_menudet_resolve_unary_math(n)) != NULL)
@@ -2598,6 +2653,45 @@ static bool p_batch_cast(me_dtype from, me_dtype to, const void *source, void *o
         }
 #undef P_BATCH_COMPLEX_CAST_CASE
     }
+    /* Identity conversions are bit copies. The typed switch below assumes a
+     * floating destination, so an unhandled integer target must decline. */
+    if (from == to && p_integer(from)) {
+        memmove(out, source, (size_t)count * dtype_size(from));
+        return true;
+    }
+    /* Implicit promotion only inserts value-preserving integer extensions. */
+#define P_BATCH_INT_CAST(FROM_D,FROM,FROM_S,TO,TO_S) \
+    if (from == FROM_D) { \
+        dsl_menudet_batch_cast_##FROM_S##_##TO_S((const FROM *)source,(TO *)out,count); \
+        return true; \
+    }
+    if (to == ME_INT16) {
+        P_BATCH_INT_CAST(ME_INT8,int8_t,i8,int16_t,i16)
+        P_BATCH_INT_CAST(ME_UINT8,uint8_t,u8,int16_t,i16)
+    } else if (to == ME_INT32) {
+        P_BATCH_INT_CAST(ME_INT8,int8_t,i8,int32_t,i32)
+        P_BATCH_INT_CAST(ME_UINT8,uint8_t,u8,int32_t,i32)
+        P_BATCH_INT_CAST(ME_INT16,int16_t,i16,int32_t,i32)
+        P_BATCH_INT_CAST(ME_UINT16,uint16_t,u16,int32_t,i32)
+    } else if (to == ME_INT64) {
+        P_BATCH_INT_CAST(ME_INT8,int8_t,i8,int64_t,i64)
+        P_BATCH_INT_CAST(ME_UINT8,uint8_t,u8,int64_t,i64)
+        P_BATCH_INT_CAST(ME_INT16,int16_t,i16,int64_t,i64)
+        P_BATCH_INT_CAST(ME_UINT16,uint16_t,u16,int64_t,i64)
+        P_BATCH_INT_CAST(ME_INT32,int32_t,i32,int64_t,i64)
+        P_BATCH_INT_CAST(ME_UINT32,uint32_t,u32,int64_t,i64)
+    } else if (to == ME_UINT16) {
+        P_BATCH_INT_CAST(ME_UINT8,uint8_t,u8,uint16_t,u16)
+    } else if (to == ME_UINT32) {
+        P_BATCH_INT_CAST(ME_UINT8,uint8_t,u8,uint32_t,u32)
+        P_BATCH_INT_CAST(ME_UINT16,uint16_t,u16,uint32_t,u32)
+    } else if (to == ME_UINT64) {
+        P_BATCH_INT_CAST(ME_UINT8,uint8_t,u8,uint64_t,u64)
+        P_BATCH_INT_CAST(ME_UINT16,uint16_t,u16,uint64_t,u64)
+        P_BATCH_INT_CAST(ME_UINT32,uint32_t,u32,uint64_t,u64)
+    }
+#undef P_BATCH_INT_CAST
+    if (!p_float(to)) return false;
 #define P_BATCH_CAST_CASE(D,T,S) \
     case D: if (to == ME_FLOAT32) dsl_menudet_batch_cast_##S##_f32((const T *)source,(float *)out,count); \
         else dsl_menudet_batch_cast_##S##_f64((const T *)source,(double *)out,count); return true;
@@ -2673,6 +2767,7 @@ static bool p_batch_eval(const me_expr *expr, p_eval_context *ctx, int nitems,
             p_batch_splat(destination,destination,width,prefill_lanes);
         }
     }
+    bool uniform_ready[P_BATCH_NODES] = {false};
     for (int begin=0; begin<nitems;) {
         int count=nitems-begin < tile_lanes ? nitems-begin : tile_lanes;
         unsigned char *out_tile=(unsigned char *)out+(size_t)begin*stride;
@@ -2704,6 +2799,8 @@ static bool p_batch_eval(const me_expr *expr, p_eval_context *ctx, int nitems,
              * Masks also form part of CSE identity: values are never reused
              * from an unrelated participation domain. */
             const bool *guard = instruction->guard < 0 ? NULL : (const bool *)values[instruction->guard];
+            /* A uniform conversion that already ran needs no per-run traversal. */
+            if (instruction->op == P_BATCH_CAST && instruction->uniform && uniform_ready[op]) continue;
             int tile_count = count;
             for (int lane = 0; lane < tile_count;) {
                 while (lane < tile_count && guard && !guard[lane]) lane++;
@@ -2726,29 +2823,69 @@ static bool p_batch_eval(const me_expr *expr, p_eval_context *ctx, int nitems,
                 }
                 if (instruction->op == P_BATCH_SELECT) {
                     const bool *condition = (const bool *)values[instruction->third] + offset;
-                    for (int i = 0; i < count; i++) {
+                    /* Element-width selects compile to branchless moves; the
+                     * generic path covers strings/complex and exotic widths. */
+#define P_BATCH_SELECT_LOOP(T) do { \
+    T *d=(T *)destination; const T *l=(const T *)left, *r=(const T *)right; \
+    for (int i=0; i<count; i++) d[i]=condition[i] ? l[i] : r[i]; \
+} while (0)
+                    if (width == 1) P_BATCH_SELECT_LOOP(uint8_t);
+                    else if (width == 2) P_BATCH_SELECT_LOOP(uint16_t);
+                    else if (width == 4) P_BATCH_SELECT_LOOP(uint32_t);
+                    else if (width == 8) P_BATCH_SELECT_LOOP(uint64_t);
+                    else for (int i = 0; i < count; i++)
                         memcpy(destination + (size_t)i * width,
                             (condition[i] ? left : right) + (size_t)i * width, width);
-                    }
+#undef P_BATCH_SELECT_LOOP
                     continue;
                 }
                 if (instruction->op == P_BATCH_CAST) {
-                    /* Only unguarded uniform conversions persist across tiles.
-                     * A guarded slot may be uninitialized in earlier tiles. */
-                    if (instruction->uniform && !guard && begin) continue;
                     const me_expr *arg=n->parameters[0];
-                    if (!instruction->uniform && p_batch_cast(arg->dtype,n->dtype,left,destination,count)) continue;
-                    for (int i=0; i<(instruction->uniform ? 1 : count); i++) {
+                    if (instruction->uniform) {
+                        /* A uniform conversion is one scalar. Convert it once when
+                         * any lane first participates, then fill the whole tile:
+                         * a map whose lanes all skip never converts, so strict FP
+                         * status flags stay identical to per-run evaluation. */
+                        if (uniform_ready[op]) continue;
+                        unsigned char *slot = storage + (size_t)op * slot_bytes;
+                        me_scalar value,converted;
+                        read_scalar(values[instruction->left],arg->dtype,&value);
+                        me_menudet_numeric_status status = p_numpy(n) && !p_weak(arg) ?
+                            p_numpy_convert(arg->dtype,&value,n->dtype,&converted) :
+                            p_convert(arg->dtype,&value,n->dtype,&converted);
+                        if (status != ME_MENUDET_NUMERIC_OK) {
+                            if (storage != stack_storage.bytes) free(storage);
+                            return false;
+                        }
+                        write_scalar(slot,n->dtype,n->dtype,&converted);
+                        p_batch_splat(slot,slot,width,tile_count);
+                        uniform_ready[op] = true;
+                        continue;
+                    }
+                    if (p_batch_cast(arg->dtype,n->dtype,left,destination,count)) continue;
+                    for (int i=0; i<count; i++) {
                         me_scalar value,converted;
                         read_scalar(left+(size_t)i*dtype_size(arg->dtype),arg->dtype,&value);
-                        p_convert(arg->dtype,&value,n->dtype,&converted);
+                        /* Mirror p_eval: weak scalars take the checked conversion,
+                         * strong values follow NumPy's modular semantics. */
+                        me_menudet_numeric_status status = p_numpy(n) && !p_weak(arg) ?
+                            p_numpy_convert(arg->dtype,&value,n->dtype,&converted) :
+                            p_convert(arg->dtype,&value,n->dtype,&converted);
+                        if (status != ME_MENUDET_NUMERIC_OK) {
+                            if (storage != stack_storage.bytes) free(storage);
+                            return false;
+                        }
                         write_scalar(destination+(size_t)i*width,n->dtype,n->dtype,&converted);
                     }
-                    if (instruction->uniform) p_batch_splat(destination,destination,width,count);
                     continue;
                 }
                 bool left_u = instruction->left >= 0 && program.instructions[instruction->left].uniform;
                 bool right_u = instruction->right >= 0 && program.instructions[instruction->right].uniform;
+                if (instruction->op == P_BATCH_MOD) {
+                    dsl_menudet_batch_mod_i32((const int32_t *)left, (const int32_t *)right,
+                        (int32_t *)destination, count);
+                    continue;
+                }
                 if (instruction->op == P_BATCH_POWER_CHAIN) {
                     if (n->dtype == ME_FLOAT32) dsl_menudet_batch_powi_f32((const float *)left,instruction->exponent,(float *)destination,count);
                     else dsl_menudet_batch_powi_f64((const double *)left,instruction->exponent,(double *)destination,count);
@@ -2891,6 +3028,9 @@ static bool p_batch_eval(const me_expr *expr, p_eval_context *ctx, int nitems,
             case P_BATCH_ADD: dsl_menudet_batch_add_sv_##S(*a,b,d,count); break; \
             case P_BATCH_SUB: dsl_menudet_batch_sub_sv_##S(*a,b,d,count); break; \
             case P_BATCH_MUL: dsl_menudet_batch_mul_sv_##S(*a,b,d,count); break; \
+            case P_BATCH_AND: dsl_menudet_batch_and_sv_##S(*a,b,d,count); break; \
+            case P_BATCH_OR: dsl_menudet_batch_or_sv_##S(*a,b,d,count); break; \
+            case P_BATCH_XOR: dsl_menudet_batch_xor_sv_##S(*a,b,d,count); break; \
             default: break; \
         } \
     } else if (!left_u && right_u) { \
@@ -2898,6 +3038,9 @@ static bool p_batch_eval(const me_expr *expr, p_eval_context *ctx, int nitems,
             case P_BATCH_ADD: dsl_menudet_batch_add_vs_##S(a,*b,d,count); break; \
             case P_BATCH_SUB: dsl_menudet_batch_sub_vs_##S(a,*b,d,count); break; \
             case P_BATCH_MUL: dsl_menudet_batch_mul_vs_##S(a,*b,d,count); break; \
+            case P_BATCH_AND: dsl_menudet_batch_and_vs_##S(a,*b,d,count); break; \
+            case P_BATCH_OR: dsl_menudet_batch_or_vs_##S(a,*b,d,count); break; \
+            case P_BATCH_XOR: dsl_menudet_batch_xor_vs_##S(a,*b,d,count); break; \
             default: break; \
         } \
     } else { \
@@ -2905,6 +3048,9 @@ static bool p_batch_eval(const me_expr *expr, p_eval_context *ctx, int nitems,
             case P_BATCH_ADD: dsl_menudet_batch_add_##S(a,b,d,count); break; \
             case P_BATCH_SUB: dsl_menudet_batch_sub_##S(a,b,d,count); break; \
             case P_BATCH_MUL: dsl_menudet_batch_mul_##S(a,b,d,count); break; \
+            case P_BATCH_AND: dsl_menudet_batch_and_##S(a,b,d,count); break; \
+            case P_BATCH_OR: dsl_menudet_batch_or_##S(a,b,d,count); break; \
+            case P_BATCH_XOR: dsl_menudet_batch_xor_##S(a,b,d,count); break; \
             case P_BATCH_NEG: dsl_menudet_batch_neg_##S(a,d,count); break; \
             default: break; \
         } \

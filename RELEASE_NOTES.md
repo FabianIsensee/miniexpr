@@ -8,10 +8,6 @@ Changes from 0.2.0 to 0.2.1
   and int64 + uint32 is int64 (they were widened one step further, and int64
   with a narrower unsigned type went to float64).
 
-* `and`, `or` and `not` treat a nonzero operand as true, as Python does,
-  also when the result is numeric: `x or y` with float64 `x = -0.5` and a float
-  output was 0 (the operands were truncated to int), and NaN was undefined.
-
 * Expression operator precedence follows Python. Behaviour change: `-x ** 2` is
   now `-(x ** 2)` (was `(-x) ** 2`), `~x ** 2` is `~(x ** 2)`, `a ** b ** c` is
   `a ** (b ** c)` (was `(a ** b) ** c`), and in plain expressions `a < b < c` is
@@ -73,20 +69,6 @@ Changes from 0.2.0 to 0.2.1
   result takes the divisor's sign. DSL JIT kernels that call `remainder()` run
   on the interpreter (as for `%`); the codegen cache version is bumped. `fmod()`
   is unchanged (C `fmod`, as `np.fmod`). Menudet kernels already used these rules.
-
-* Complex powers follow NumPy (`npy_cpow`) in expressions, full-profile DSL
-  kernels and Menudet kernels. A constant base (`2 ** z`) was computed with the
-  real `pow()` of the real parts, dropping the imaginary part. `x ** 0` is now
-  1 (also for `0 ** 0`, which was NaN), a zero base gives 0 for an exponent with
-  a positive real part and NaN otherwise, and integer exponents with `|n| < 100`
-  are computed by repeated multiplication, so `(1+1j) ** 4` is exactly -4.
-  Other exponents still use the C library's `cpow()`, as NumPy does.
-
-* `nextafter()` of float32 operands steps by a float32 ulp, as `np.nextafter`
-  does. With a constant operand (`nextafter(a, 2)`) the interpreter stepped by a
-  float64 ulp, which rounding back to float32 undid, so the input came back
-  unchanged; DSL JIT kernels did the same for every float32 `nextafter()`, which
-  now runs on the interpreter. The JIT codegen cache version is bumped.
 
 * Menudet JIT emits same-width typed integer bitwise operations directly instead
   of calling scalar interpreter helpers. Scalar integer/Boolean local declarations no

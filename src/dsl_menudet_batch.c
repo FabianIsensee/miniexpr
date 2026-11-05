@@ -106,6 +106,40 @@ ME_BATCH_INT_OPS(uint32_t,u32)
 ME_BATCH_INT_OPS(uint64_t,u64)
 #undef ME_BATCH_INT_OPS
 
+/* Bitwise lane-local kernels; boolean lanes are stored as 0/1 bytes, where
+ * &, | and ^ coincide with the logical operators. */
+#define ME_BATCH_BITWISE(T,S) \
+    ME_BATCH_KERNEL_VV(and,T,S,(T)(a[i]&b[i])) \
+    ME_BATCH_KERNEL_VS(and,T,S,(T)(a[i]&b)) \
+    ME_BATCH_KERNEL_SV(and,T,S,(T)(a&b[i])) \
+    ME_BATCH_KERNEL_VV(or,T,S,(T)(a[i]|b[i])) \
+    ME_BATCH_KERNEL_VS(or,T,S,(T)(a[i]|b)) \
+    ME_BATCH_KERNEL_SV(or,T,S,(T)(a|b[i])) \
+    ME_BATCH_KERNEL_VV(xor,T,S,(T)(a[i]^b[i])) \
+    ME_BATCH_KERNEL_VS(xor,T,S,(T)(a[i]^b)) \
+    ME_BATCH_KERNEL_SV(xor,T,S,(T)(a^b[i]))
+
+ME_BATCH_BITWISE(uint8_t,u8)
+ME_BATCH_BITWISE(uint16_t,u16)
+ME_BATCH_BITWISE(uint32_t,u32)
+ME_BATCH_BITWISE(uint64_t,u64)
+#undef ME_BATCH_BITWISE
+
+/* NumPy signed remainder is total, with the divisor's sign. Guard C's
+ * exceptional divisions before %, including INT32_MIN / -1. */
+ME_BATCH_NOINLINE void dsl_menudet_batch_mod_i32(const int32_t *a, const int32_t *b,
+                                               int32_t *restrict out, int count) {
+    for (int i = 0; i < count; i++) {
+        int32_t left = a[i], right = b[i];
+        if (!right || (left == INT32_MIN && right == -1)) {
+            out[i] = 0;
+        } else {
+            int32_t rem = left % right;
+            out[i] = rem && ((rem < 0) != (right < 0)) ? rem + right : rem;
+        }
+    }
+}
+
 /* Real -> complex follows p_convert's double intermediate (including integer
  * -> complex64 double rounding); never construct values with real + I*imag. */
 #define ME_BATCH_COMPLEX_CAST(T,S) \
@@ -176,6 +210,23 @@ ME_BATCH_NOINLINE void dsl_menudet_batch_cast_f32_f64(const float *a, double *re
     for (int i=0; i<count; i++) out[i]=(double)a[i];
 }
 #undef ME_BATCH_CAST
+
+/* Value-preserving integer extensions inserted by NumPy dtype promotion. */
+#define ME_BATCH_INT_CAST(TO,TO_S,FROM,FROM_S) \
+ME_BATCH_NOINLINE void dsl_menudet_batch_cast_##FROM_S##_##TO_S(const FROM *a, TO *restrict out, int count) { \
+    for (int i=0; i<count; i++) out[i]=(TO)a[i]; \
+}
+ME_BATCH_INT_CAST(int16_t,i16,int8_t,i8) ME_BATCH_INT_CAST(int16_t,i16,uint8_t,u8)
+ME_BATCH_INT_CAST(int32_t,i32,int8_t,i8) ME_BATCH_INT_CAST(int32_t,i32,uint8_t,u8)
+ME_BATCH_INT_CAST(int32_t,i32,int16_t,i16) ME_BATCH_INT_CAST(int32_t,i32,uint16_t,u16)
+ME_BATCH_INT_CAST(int64_t,i64,int8_t,i8) ME_BATCH_INT_CAST(int64_t,i64,uint8_t,u8)
+ME_BATCH_INT_CAST(int64_t,i64,int16_t,i16) ME_BATCH_INT_CAST(int64_t,i64,uint16_t,u16)
+ME_BATCH_INT_CAST(int64_t,i64,int32_t,i32) ME_BATCH_INT_CAST(int64_t,i64,uint32_t,u32)
+ME_BATCH_INT_CAST(uint16_t,u16,uint8_t,u8)
+ME_BATCH_INT_CAST(uint32_t,u32,uint8_t,u8) ME_BATCH_INT_CAST(uint32_t,u32,uint16_t,u16)
+ME_BATCH_INT_CAST(uint64_t,u64,uint8_t,u8) ME_BATCH_INT_CAST(uint64_t,u64,uint16_t,u16)
+ME_BATCH_INT_CAST(uint64_t,u64,uint32_t,u32)
+#undef ME_BATCH_INT_CAST
 
 static const me_pj_arith_table s_arith_table = {
     .f64_vv = { dsl_menudet_batch_add_f64, dsl_menudet_batch_sub_f64, dsl_menudet_batch_mul_f64, dsl_menudet_batch_div_f64 },
